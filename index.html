@@ -8,6 +8,28 @@
   :root {
     --bg: #14161a; --panel: #1c1f26; --panel2: #232733; --line: #313848;
     --fg: #d7dce6; --dim: #8b95a8; --acc: #6ea8fe; --ok: #5ec97a; --warn: #e6a648; --err: #f2777a;
+    /* 下面几个是「夜晚」模式专用的取值，白天模式在 html.day 里整组换掉 */
+    --btn-fg: #10131a; --danger-fg: #17110f;
+    --console-bg: #101216; --console-fg: #cdd6e6;
+    --tag-error-bg: #4a1f22; --tag-warn-bg: #46351b; --tag-info-bg: #1e3350;
+    /* 积木区：画布和工具箱两种模式都是浅底（积木配色决定的），只是深浅跟着主题挪一点 */
+    --board: #f2f3f7; --tb-bg: #eceef4; --tb-line: #d3d7e2;
+    --tb-fg: #2f3543; --tb-sel-fg: #ffffff; --tb-hover: rgba(47, 53, 67, .16);
+    color-scheme: dark;   /* 让浏览器的原生控件（下拉列表、复选框、滚动条）跟着走深色 */
+  }
+  /*
+   * 白天模式：整套变量换个值，页面里所有颜色都是从这些变量取的。
+   * 积木画布两种模式都保持浅底 —— Blockly 的积木配色本来就是按浅底调的，
+   * 而且 Blockly 注入后自己会往 <head> 追加 CSS，深色画布要额外打架，不值。
+   */
+  html.day {
+    --bg: #f2f4f8; --panel: #ffffff; --panel2: #e9edf4; --line: #d4dae5;
+    --fg: #222834; --dim: #697285; --acc: #2f6fed; --ok: #1b7c43; --warn: #93600f; --err: #c4334b;
+    --btn-fg: #ffffff; --danger-fg: #ffffff;
+    --console-bg: #ffffff; --console-fg: #222834;
+    --tag-error-bg: #f8dee2; --tag-warn-bg: #f7e8cd; --tag-info-bg: #dbe7fb;
+    --board: #fbfcfe; --tb-bg: #f4f6fa; --tb-line: #dde2ec;
+    color-scheme: light;
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; }
@@ -35,11 +57,11 @@
   input[type=number] { width: 78px; }
   label.chk { display: flex; align-items: center; gap: 5px; font-size: 12px; color: var(--dim); padding-bottom: 4px; }
   button {
-    background: var(--acc); color: #10131a; border: 0; border-radius: 6px;
+    background: var(--acc); color: var(--btn-fg); border: 0; border-radius: 6px;
     padding: 7px 15px; font-size: 13px; font-weight: 600; cursor: pointer;
   }
   button.secondary { background: var(--panel2); color: var(--fg); border: 1px solid var(--line); font-weight: 500; }
-  button.danger { background: var(--err); color: #17110f; }
+  button.danger { background: var(--err); color: var(--danger-fg); }
   button:disabled { opacity: .45; cursor: not-allowed; }
   button:hover:not(:disabled) { filter: brightness(1.1); }
   button.mini { padding: 1px 9px; font-size: 11px; font-weight: 500; border-radius: 4px; }
@@ -50,26 +72,55 @@
   /* ---------- 主体：左积木，右代码/诊断/输入/输出 ---------- */
   main {
     flex: 1; min-height: 0; display: grid;
-    grid-template-columns: minmax(0, 58fr) minmax(0, 42fr); gap: 12px; padding: 12px 18px;
+    /* --split 是左边占的百分比，拖动中间那根分隔条时由 js/app.js 改；双击分隔条回到 58% */
+    --split: 58%;
+    /* 下面三个数只有这一处写死，js/app.js 从计算样式里读（splitBounds），不重复一份，
+       所以窄窗口下「JS 夹的百分比」和「CSS 允许的百分比」不会打架（否则拖到边上会停住）。 */
+    --pane-l-min: 240px;   /* 积木区最少留多宽 */
+    --pane-r-min: 280px;   /* 代码区最少留多宽 */
+    --bar-w: 12px;         /* 分隔条那一列的宽度，.splitter 用的也是它 */
+    grid-template-columns: minmax(var(--pane-l-min), var(--split)) var(--bar-w) minmax(var(--pane-r-min), 1fr);
+    gap: 6px; padding: 12px 18px;
   }
   .pane { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+
+  /* ---------- 左右宽度调节条 ---------- */
+  .splitter {
+    position: relative; align-self: stretch; justify-self: center;
+    width: var(--bar-w); min-width: var(--bar-w); cursor: col-resize; border-radius: 6px;
+    background: var(--panel); border: 1px solid var(--line);
+    display: flex; align-items: center; justify-content: center;
+    touch-action: none;          /* 触屏上拖动时不要让浏览器当成滚动 */
+    transition: background .12s, border-color .12s;
+  }
+  .splitter::after {       /* 中间那两个「||」形的小把手 */
+    content: ""; width: 4px; height: 26px; border-radius: 2px;
+    background: repeating-linear-gradient(to right, var(--dim) 0 1px, transparent 1px 3px);
+    opacity: .8;
+  }
+  .splitter:hover, .splitter.active, .splitter:focus-visible { background: var(--acc); border-color: var(--acc); outline: none; }
+  .splitter:hover::after, .splitter.active::after, .splitter:focus-visible::after { background: repeating-linear-gradient(to right, #fff 0 1px, transparent 1px 3px); }
+  /* 正在拖的时候：整页别选中文字，鼠标形态也钉成 col-resize */
+  body.dragging { user-select: none; cursor: col-resize; }
+  body.dragging .splitter { background: var(--acc); border-color: var(--acc); }
+
   .cap {
     font-size: 11px; color: var(--dim); margin-bottom: 4px; flex: none;
     display: flex; justify-content: space-between; align-items: center; gap: 8px;
   }
   .cap-right { display: flex; align-items: center; gap: 10px; }
 
-  #blocklyDiv { flex: 1; min-height: 0; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: #f2f3f7; }
+  #blocklyDiv { flex: 1; min-height: 0; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: var(--board); }
 
   /* Blockly 自带的工具箱样式是「深底白字」，这里是浅底，所以分组名要改成深色。
      Blockly 的 CSS 是注入到 <head> 末尾的，同优先级会覆盖我们，所以选择器都带上
-     #blocklyDiv 这个 id 提高权重。 */
-  #blocklyDiv .blocklyToolbox { background: #eceef4; border-right: 1px solid #d3d7e2; }
+     #blocklyDiv 这个 id 提高权重。颜色全走变量，白天/夜晚只换变量值。 */
+  #blocklyDiv .blocklyToolbox { background: var(--tb-bg); border-right: 1px solid var(--tb-line); }
   #blocklyDiv .blocklyToolboxCategoryContainer { margin-left: 4px; border-radius: 6px; }
-  #blocklyDiv .blocklyToolboxCategoryLabel { color: #2f3543; font-weight: 600; }
-  #blocklyDiv .blocklyToolboxCategory:not(.blocklyToolboxSelected) .blocklyToolboxCategoryLabel { color: #2f3543; }
-  #blocklyDiv .blocklyToolboxSelected .blocklyToolboxCategoryLabel { color: #fff; }
-  #blocklyDiv .blocklyToolboxCategory:not(.blocklyToolboxSelected):hover { background-color: rgba(47, 53, 67, .16); }
+  #blocklyDiv .blocklyToolboxCategoryLabel { color: var(--tb-fg); font-weight: 600; }
+  #blocklyDiv .blocklyToolboxCategory:not(.blocklyToolboxSelected) .blocklyToolboxCategoryLabel { color: var(--tb-fg); }
+  #blocklyDiv .blocklyToolboxSelected .blocklyToolboxCategoryLabel { color: var(--tb-sel-fg); }
+  #blocklyDiv .blocklyToolboxCategory:not(.blocklyToolboxSelected):hover { background-color: var(--tb-hover); }
   #blocklyDiv .blocklyToolboxCategory { height: 24px; line-height: 24px; }
 
   .right { display: grid; grid-template-rows: minmax(0, 47fr) minmax(0, 20fr) minmax(0, 12fr) minmax(0, 21fr); gap: 9px; min-height: 0; }
@@ -84,7 +135,7 @@
   }
   textarea:focus { outline: none; border-color: var(--acc); }
   #stdin { background: var(--panel); }
-  #out { background: #101216; color: #cdd6e6; }
+  #out { background: var(--console-bg); color: var(--console-fg); }
 
   /* ---------- 诊断列表 ---------- */
   #diag {
@@ -97,9 +148,9 @@
   }
   .d:hover { background: var(--panel2); }
   .d .tag { flex: none; font-size: 10px; font-weight: 700; letter-spacing: .3px; padding: 1px 5px; border-radius: 3px; margin-top: 2px; }
-  .d.error .tag { background: #4a1f22; color: var(--err); }
-  .d.warn  .tag { background: #46351b; color: var(--warn); }
-  .d.info  .tag { background: #1e3350; color: var(--acc); }
+  .d.error .tag { background: var(--tag-error-bg); color: var(--err); }
+  .d.warn  .tag { background: var(--tag-warn-bg); color: var(--warn); }
+  .d.info  .tag { background: var(--tag-info-bg); color: var(--acc); }
   .d .lbl { color: var(--dim); flex: none; max-width: 30%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .d .txt { flex: 1; min-width: 0; white-space: pre-wrap; word-break: break-word; }
   .d.none { cursor: default; color: var(--ok); padding: 6px 8px; }
@@ -125,6 +176,16 @@
   footer li { margin: 1px 0; break-inside: avoid; }
   code { background: var(--panel2); padding: 1px 5px; border-radius: 4px; font-size: 12px; }
 </style>
+<script>
+  /*
+   * 主题要在首屏绘制之前就定下来，否则选了白天模式也会先闪一帧深色底。
+   * 这里的键名必须和 js/app.js 里的 LS.opts（blockly-c.opts）一致。
+   */
+  try {
+    var savedOpts = JSON.parse(localStorage.getItem('blockly-c.opts') || '{}');
+    if (savedOpts.theme === 'day') document.documentElement.classList.add('day');
+  } catch (e) { /* 读不出来就按默认的夜晚模式，让 app.js 去处理 */ }
+</script>
 </head>
 <body>
 <header>
@@ -159,6 +220,9 @@
   </div>
   <div class="field"><span>运行超时(ms)</span><input type="number" id="timeout" value="5000" min="500" step="500"></div>
   <label class="chk"><input type="checkbox" id="annotate" checked> 代码里带中文注释</label>
+  <label class="chk" title="只是换整套配色变量；积木画布两种模式都是浅底，Blockly 的积木颜色本来就是按浅底调的">
+    <input type="checkbox" id="theme"> 白天模式
+  </label>
   <div class="sep"></div>
   <button id="regen" class="secondary">按积木重新生成</button>
   <div class="grow"></div>
@@ -183,6 +247,14 @@
     </div>
     <div id="blocklyDiv"></div>
   </div>
+
+  <!-- 拖动这根条调左右比例：按住拖动、双击回 58%、方向键每次 2% -->
+  <!-- aria-valuemin/max 是 outer 边界，和 js/app.js 的 SPLIT.min / SPLIT.max 保持一致；
+       窄窗口下 CSS 那两条像素下限会先起效，实际能到的范围由 splitBounds() 现算 -->
+  <div class="splitter" id="splitter" role="separator" aria-orientation="vertical"
+       tabindex="0" aria-valuemin="18" aria-valuemax="82" aria-valuenow="58"
+       title="拖动调整积木区/代码区宽度 · 双击回到默认 58% · 左右方向键每次 2%"
+       aria-label="拖动调整左右两栏宽度"></div>
 
   <div class="pane right">
     <section>
