@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>积木编程 → C / C++ — 拖积木生成等价代码并在浏览器里编译运行</title>
+<style>
+  :root {
+    --bg: #14161a; --panel: #1c1f26; --panel2: #232733; --line: #313848;
+    --fg: #d7dce6; --dim: #8b95a8; --acc: #6ea8fe; --ok: #5ec97a; --warn: #e6a648; --err: #f2777a;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg); height: 100vh;
+    display: flex; flex-direction: column; overflow: hidden;
+    font: 14px/1.6 -apple-system, "Segoe UI", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+  }
+  header { padding: 9px 18px 7px; border-bottom: 1px solid var(--line); flex: none; }
+  h1 { margin: 0; font-size: 16px; font-weight: 600; letter-spacing: .3px; }
+  /* 标题就是仓库链接；说明文字收进悬停提示，页面顶部只留一行 */
+  h1 a { color: inherit; text-decoration: none; }
+  h1 a:hover { color: var(--acc); text-decoration: underline; }
+
+  .toolbar {
+    display: flex; flex-wrap: wrap; gap: 8px 10px; align-items: flex-end;
+    padding: 9px 18px; background: var(--panel); border-bottom: 1px solid var(--line); flex: none;
+  }
+  .field { display: flex; flex-direction: column; gap: 2px; }
+  .field > span { font-size: 11px; color: var(--dim); }
+  select, input[type=text], input[type=number] {
+    background: var(--panel2); color: var(--fg); border: 1px solid var(--line);
+    border-radius: 5px; padding: 4px 7px; font: 12px/1.4 ui-monospace, Consolas, monospace;
+  }
+  input[type=number] { width: 78px; }
+  label.chk { display: flex; align-items: center; gap: 5px; font-size: 12px; color: var(--dim); padding-bottom: 4px; }
+  button {
+    background: var(--acc); color: #10131a; border: 0; border-radius: 6px;
+    padding: 7px 15px; font-size: 13px; font-weight: 600; cursor: pointer;
+  }
+  button.secondary { background: var(--panel2); color: var(--fg); border: 1px solid var(--line); font-weight: 500; }
+  button.danger { background: var(--err); color: #17110f; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  button:hover:not(:disabled) { filter: brightness(1.1); }
+  button.mini { padding: 1px 9px; font-size: 11px; font-weight: 500; border-radius: 4px; }
+  .grow { flex: 1; }
+  .btns { display: flex; gap: 8px; flex: none; }
+  .sep { width: 1px; align-self: stretch; background: var(--line); margin: 0 2px; }
+
+  /* ---------- 主体：左积木，右代码/诊断/输入/输出 ---------- */
+  main {
+    flex: 1; min-height: 0; display: grid;
+    grid-template-columns: minmax(0, 58fr) minmax(0, 42fr); gap: 12px; padding: 12px 18px;
+  }
+  .pane { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+  .cap {
+    font-size: 11px; color: var(--dim); margin-bottom: 4px; flex: none;
+    display: flex; justify-content: space-between; align-items: center; gap: 8px;
+  }
+  .cap-right { display: flex; align-items: center; gap: 10px; }
+
+  #blocklyDiv { flex: 1; min-height: 0; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: #f2f3f7; }
+
+  /* Blockly 自带的工具箱样式是「深底白字」，这里是浅底，所以分组名要改成深色。
+     Blockly 的 CSS 是注入到 <head> 末尾的，同优先级会覆盖我们，所以选择器都带上
+     #blocklyDiv 这个 id 提高权重。 */
+  #blocklyDiv .blocklyToolbox { background: #eceef4; border-right: 1px solid #d3d7e2; }
+  #blocklyDiv .blocklyToolboxCategoryContainer { margin-left: 4px; border-radius: 6px; }
+  #blocklyDiv .blocklyToolboxCategoryLabel { color: #2f3543; font-weight: 600; }
+  #blocklyDiv .blocklyToolboxCategory:not(.blocklyToolboxSelected) .blocklyToolboxCategoryLabel { color: #2f3543; }
+  #blocklyDiv .blocklyToolboxSelected .blocklyToolboxCategoryLabel { color: #fff; }
+  #blocklyDiv .blocklyToolboxCategory:not(.blocklyToolboxSelected):hover { background-color: rgba(47, 53, 67, .16); }
+  #blocklyDiv .blocklyToolboxCategory { height: 24px; line-height: 24px; }
+
+  .right { display: grid; grid-template-rows: minmax(0, 47fr) minmax(0, 20fr) minmax(0, 12fr) minmax(0, 21fr); gap: 9px; min-height: 0; }
+  .right > section { display: flex; flex-direction: column; min-height: 0; }
+
+  #editor { flex: 1; min-height: 0; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  textarea {
+    width: 100%; flex: 1; min-height: 0; resize: none;
+    background: var(--panel); color: var(--fg); border: 1px solid var(--line); border-radius: 8px;
+    padding: 8px 11px; font: 13px/1.5 ui-monospace, "Cascadia Mono", Consolas, monospace;
+    tab-size: 4; white-space: pre; overflow: auto;
+  }
+  textarea:focus { outline: none; border-color: var(--acc); }
+  #stdin { background: var(--panel); }
+  #out { background: #101216; color: #cdd6e6; }
+
+  /* ---------- 诊断列表 ---------- */
+  #diag {
+    flex: 1; min-height: 0; overflow: auto; border: 1px solid var(--line);
+    border-radius: 8px; background: var(--panel); padding: 4px;
+  }
+  .d {
+    display: flex; gap: 7px; align-items: flex-start; padding: 3px 7px; border-radius: 5px;
+    font-size: 12px; line-height: 1.45; cursor: pointer;
+  }
+  .d:hover { background: var(--panel2); }
+  .d .tag { flex: none; font-size: 10px; font-weight: 700; letter-spacing: .3px; padding: 1px 5px; border-radius: 3px; margin-top: 2px; }
+  .d.error .tag { background: #4a1f22; color: var(--err); }
+  .d.warn  .tag { background: #46351b; color: var(--warn); }
+  .d.info  .tag { background: #1e3350; color: var(--acc); }
+  .d .lbl { color: var(--dim); flex: none; max-width: 30%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .d .txt { flex: 1; min-width: 0; white-space: pre-wrap; word-break: break-word; }
+  .d.none { cursor: default; color: var(--ok); padding: 6px 8px; }
+  .d.none:hover { background: none; }
+
+  /* ---------- 状态条 ---------- */
+  .metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; flex: none; margin-top: 5px; }
+  .cell { display: flex; flex-direction: column; line-height: 1.15; min-width: 0; }
+  .cell > span { font-size: 10px; color: var(--dim); }
+  .cell > b { font-size: 12px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .headline { font-size: 11px; line-height: 1.35; color: var(--dim); flex: none;
+              white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .ok { color: var(--ok); } .err { color: var(--err); } .warn { color: var(--warn); }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--dim);
+         display: inline-block; margin-right: 6px; vertical-align: 1px; }
+  .dot.busy { background: var(--warn); animation: blink 1s infinite; }
+  .dot.ready { background: var(--ok); } .dot.bad { background: var(--err); }
+  @keyframes blink { 50% { opacity: .25; } }
+
+  footer { flex: none; padding: 0 18px 7px; font-size: 12px; color: var(--dim); }
+  footer summary { cursor: pointer; color: var(--fg); font-size: 12px; }
+  footer ul { margin: 4px 0 0; padding-left: 18px; columns: 2; column-gap: 28px; }
+  footer li { margin: 1px 0; break-inside: avoid; }
+  code { background: var(--panel2); padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1><a id="home" href="https://github.com/zhblue/blocks" title="Blockly 拖积木 · 生成等价的 C / C++ 代码 · clang.wasm 就地编译运行&#10;左侧拼积木，右侧实时得到等价源码（可手改），点「编译并运行」由浏览器里的 clang + wasm-ld 编成 wasm 执行。&#10;全程不需要服务器，首次加载约 58 MB 工具链。&#10;源码仓库：https://github.com/zhblue/blocks">积木编程 → C / C++</a></h1>
+</header>
+
+<div class="toolbar">
+  <div class="field"><span>示例</span><select id="examples"></select></div>
+  <div class="field"><span>语言</span>
+    <select id="lang">
+      <option value="cpp" selected>C++</option>
+      <option value="c">C</option>
+    </select>
+  </div>
+  <div class="field"><span>标准</span>
+    <!-- 候选跟着「语言」变，静态写的是默认 C++ 那一份 -->
+    <select id="std">
+      <option value="c++98">-std=c++98</option>
+      <option value="c++11">-std=c++11</option>
+      <option value="c++14">-std=c++14</option>
+      <option value="c++17" selected>-std=c++17</option>
+      <option value="c++2a">-std=c++2a（即 C++20）</option>
+    </select>
+  </div>
+  <div class="field"><span>优化</span>
+    <select id="opt">
+      <option value="0">-O0</option>
+      <option value="1">-O1</option>
+      <option value="2" selected>-O2</option>
+      <option value="3">-O3</option>
+    </select>
+  </div>
+  <div class="field"><span>运行超时(ms)</span><input type="number" id="timeout" value="5000" min="500" step="500"></div>
+  <label class="chk"><input type="checkbox" id="annotate" checked> 代码里带中文注释</label>
+  <div class="sep"></div>
+  <button id="regen" class="secondary">按积木重新生成</button>
+  <div class="grow"></div>
+  <div class="btns">
+    <button id="run">编译并运行</button>
+    <button id="stop" class="danger" disabled>停止</button>
+    <button id="reload" class="secondary">重载工具链</button>
+  </div>
+  <div class="sep"></div>
+  <button id="save" class="secondary" title="把当前积木存进浏览器本地">保存</button>
+  <button id="export" class="secondary" title="导出积木 JSON">导出</button>
+  <button id="import" class="secondary" title="导入积木 JSON">导入</button>
+  <input type="file" id="file" accept="application/json,.json" hidden>
+  <button id="clear" class="danger" title="清空整个工作区">清空积木</button>
+</div>
+
+<main>
+  <div class="pane">
+    <div class="cap">
+      <span>积木工作区（从左侧工具箱拖入，可嵌套、可拖动排序）</span>
+      <span id="blockcount"></span>
+    </div>
+    <div id="blocklyDiv"></div>
+  </div>
+
+  <div class="pane right">
+    <section>
+      <div class="cap">
+        <span id="srccap">生成的 C++ 代码 main.cc（可直接微调后再编译；改过积木会被覆盖，用「按积木重新生成」找回）</span>
+        <span class="cap-right"><span id="srclen"></span></span>
+      </div>
+      <div id="editor"></div>
+    </section>
+
+    <section>
+      <div class="cap"><span>积木侧诊断（点一行会在积木区选中对应积木）</span><span id="diaglen"></span></div>
+      <div id="diag"></div>
+    </section>
+
+    <section>
+      <div class="cap"><span>标准输入 stdin</span><span>喂给「读入」积木（std::cin / scanf）</span></div>
+      <textarea id="stdin" spellcheck="false"></textarea>
+    </section>
+
+    <section>
+      <div class="cap">
+        <span>输出 stdout / stderr</span>
+        <span class="cap-right"><span id="outlen"></span><button id="clearout" class="danger mini">清空</button></span>
+      </div>
+      <textarea id="out" spellcheck="false" readonly placeholder="点「编译并运行」，或按 Ctrl+Enter"></textarea>
+      <div class="headline"><span class="dot" id="dot"></span><span id="msg">正在准备积木…</span></div>
+      <div class="metrics">
+        <div class="cell"><span>退出码</span><b id="m-exit">—</b></div>
+        <div class="cell"><span>编译耗时</span><b id="m-compile">—</b></div>
+        <div class="cell"><span>运行耗时</span><b id="m-run">—</b></div>
+        <div class="cell"><span>内存峰值</span><b id="m-mem">—</b></div>
+      </div>
+    </section>
+  </div>
+</main>
+
+<footer>
+  <details>
+    <summary>积木 ↔ C / C++ 的对应关系与已知限制</summary>
+    <ul>
+      <li>工具栏「语言」默认 <b>C++</b>：输出走 <code>std::cout</code>、读入走 <code>std::cin</code>，按需带 <code>#include &lt;iostream&gt;</code>，<code>bool</code> 是内建类型不需要头文件。切回 <b>C</b> 就是 <code>printf / scanf</code> + <code>#include &lt;stdio.h&gt;</code>，用到 <code>true/false</code> 时自动补 <code>&lt;stdbool.h&gt;</code>。</li>
+      <li>「printf / scanf」积木在两种语言下都照 C 那套语义生成（C++ 里额外带 <code>#include &lt;cstdio&gt;</code>），格式说明符数量和类型都会校验；「读入」积木选 C++ 时不再关心 <code>%lf</code> 之类的坑。</li>
+      <li>不管选哪种语言，生成的都是 C 风格代码：原生数组、C 风格强制转换、<code>(类型)</code> 括号照旧加，不会替你变成 <code>std::string</code> / <code>std::vector</code> / <code>static_cast</code>。</li>
+      <li>「输出」积木自动推导格式符（int→<code>%d</code>、double→<code>%g</code>、char→<code>%c</code>）；要手写格式串就用「printf / scanf」积木，说明符数量和类型都会校验。</li>
+      <li>「读入」只接受<b>变量</b>或<b>数组的第 i 项</b>（要的是能往里写东西的地方，算出来的数值不行），小数的原生格式必须写 <code>%lf</code>。</li>
+      <li>声明就地生成，作用域与手写 C 完全一致：循环里声明的变量出了循环就不存在，越界使用时诊断会指名道姓。</li>
+      <li>数组不做越界检查（和 C 一样），下标越界是未定义行为；局部数组请给出合理大小。</li>
+      <li>「函数」积木会自动前置函数原型，所以递归和互相调用不受摆放顺序影响。</li>
+      <li>编译器是 wasi-sdk 里的 <b>clang 8.0.1</b>：C 认 <code>c89/c99/c11/c17</code>，C++ 认 <code>c++98/c++11/c++14/c++17/c++2a</code>。「标准」下拉框会跟着语言换成对应的那一份；想要 C++20 就选 <code>-std=c++2a</code>，这个 clang 还不认识 <code>c++20</code> 这个名字。没有真实磁盘，文件读写只在内存 FS 里。</li>
+      <li>死循环靠 <code>worker.terminate()</code> 掐断，超时后拿不到精确 CPU 时间；wasm 内存超限以 <code>memory access out of bounds</code> 报出。</li>
+    </ul>
+  </details>
+</footer>
+
+<script src="vendor/blockly/blockly.min.js"></script>
+<script src="vendor/blockly/msg/zh-hans.js"></script>
+<script src="js/c-blocks.js"></script>
+<script src="js/c-generator.js"></script>
+<script src="vendor/ace/ace.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
