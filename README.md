@@ -6,6 +6,8 @@
 
 源码仓库：<https://github.com/zhblue/blocks>（页面标题点进去就是这个地址）。
 
+在线演示：<http://blocks.hustoj.com>
+
 整个目录自包含：Blockly、Ace、wasm 工具链和 sysroot（416 个文件，含 libc++ 头与静态库）全部在本地，不联网、不引用目录外的任何文件，拷走就能用。
 
 ## 运行
