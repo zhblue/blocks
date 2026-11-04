@@ -24,8 +24,8 @@ const LS = { ws: 'blockly-c.workspace', stdin: 'blockly-c.stdin', opts: 'blockly
  *              所以候选必须和工具链里那份 clang 认的名字一致。这里的 clang.wasm 是
  *              wasi-sdk 5.6 的 clang 8.0.1，从二进制里的语言名表可以读到：
  *                C   : c89 c99 c11 c17
- *                C++ : c++98 c++11 c++14 c++17 c++2a   ← 没有 c++20，那个别名是
- *              clang 10 才加的，选了会被拒；要试 C++20 就用 c++2a。
+ *                C++ : c++98 c++11 c++14 c++17 c++2a   ← 语言表里没有 c++20 这个
+ *              名字，选了会被 clang 拒；要试 C++20 就选 c++2a。
  *              同理 C++ 模式绝不能出现 -std=c11 这种错配。
  * 生成器 js/c-generator.js 认的也是这个 key（'cpp' / 'c'）。
  */
@@ -65,6 +65,30 @@ function fillStd(keep) {
 function refreshSourceCaption() {
   $('srccap').textContent = '生成的 ' + langOpt().label + ' 代码 ' + langOpt().file
     + '（可直接微调后再编译；改过积木会被覆盖，用「按积木重新生成」找回）';
+}
+
+/*
+ * 白天 / 夜晚。页面里所有颜色都取自 <style> 里的那一组 CSS 变量，
+ * 所以切主题只做一件事：给 <html> 挂不挂 .day 这个类。
+ * 代码面板是例外 —— Ace 的主题是它自己的一套 CSS，得单独换：
+ *   one_dark 是 vendor/ace/ 里额外带的一个文件（夜晚）；
+ *   textmate 是 Ace 的默认主题，已经打进 vendor/ace/ace.js，白天模式不用多下一个文件。
+ * <head> 里还有一段三行的内联脚本，它先读同一个存档把 .day 挂上，免得选白天的人
+ * 每次打开都先闪一帧深色。两处用的键名都是 LS.opts。
+ */
+const THEMES = {
+  night: { ace: 'ace/theme/one_dark', label: '夜晚' },
+  day: { ace: 'ace/theme/textmate', label: '白天' },
+};
+const themeKey = () => ($('theme').checked ? 'day' : 'night');
+
+/** 切到指定主题：改 <html> 的 .day 类、同步复选框、换 Ace 主题 */
+function applyTheme(mode) {
+  const key = mode === 'day' ? 'day' : 'night';
+  document.documentElement.classList.toggle('day', key === 'day');
+  $('theme').checked = key === 'day';
+  srcEditor.setTheme(THEMES[key].ace);
+  return key;
 }
 
 /* ================================================================== */
@@ -335,6 +359,22 @@ const EXAMPLES = {
         }),
       ],
     }), { stdin: '20 1.75 A\n' }),
+
+  /* 「文本」变量是唯一按语言变身的积木：C++ 出 std::string，C 出 char[256]。
+     这个示例故意只用两边都成立的写法，切语言就能对着看生成的差别。 */
+  '文本变量：读名字、打招呼': () => loadProgram(
+    () => mk('c_main', {}, {
+      BODY: [
+        mk('c_var_decl', { TYPE: 'string', NAME: 'name' }, {}),
+        mk('c_var_decl', { TYPE: 'int', NAME: 'age' }, {}),
+        mk('c_print', { NL: 'FALSE' }, { MSG: txt('先报名字，再报年龄：') }),
+        mk('c_read_var', { VAR: 'name' }, {}),
+        mk('c_read_var', { VAR: 'age' }, {}),
+        /* %s 配文本变量：C++ 自动补 .c_str()，C 直接把数组名交出去 —— 两种语言都编译得过 */
+        mk('c_printf', { FMT: '你好，%s！明年 %d 岁。\\n' }, { ARG0: get('name'), ARG1: get('age') }),
+        mk('c_print', { NL: 'TRUE' }, { MSG: get('name') }),
+      ],
+    }), { stdin: '张三 20\n' }),
 };
 
 /* ================================================================== */
@@ -344,9 +384,10 @@ const ACE_BASE = new URL('vendor/ace/', location.href).href;
 ace.config.setModuleUrl('ace/mode/c_cpp', ACE_BASE + 'mode-c_cpp.js');
 ace.config.setModuleUrl('ace/theme/one_dark', ACE_BASE + 'theme-one_dark.js');
 
+/* 初始主题跟着 <head> 里那段脚本挂好的 .day 走，免得白天模式建好后再闪一下深色 */
 const srcEditor = ace.edit('editor', {
   mode: 'ace/mode/c_cpp',
-  theme: 'ace/theme/one_dark',
+  theme: document.documentElement.classList.contains('day') ? THEMES.day.ace : THEMES.night.ace,
   fontSize: '13px',
   showPrintMargin: false,
   useWorker: false,
@@ -367,6 +408,140 @@ srcEditor.on('change', () => {
   if (v !== lastGenerated) codeTouched = true;
   else codeTouched = false;
 });
+
+/* ================================================================== */
+/* 3.5 左右两栏宽度：中间那根可以拖的分隔条                              */
+/* ================================================================== */
+/*
+ * 宽度写进 main 的 CSS 变量 --split（百分比），所以缩放窗口时比例自动跟着走，
+ * 不用重新算像素。
+ * SPLIT.min/max 是「不管窗口多宽都不许超过」的百分比硬边界（再极端正好是一边只剩
+ * 一根工具条，不如直接不让拖过去），同时也是 index.html 里 aria-valuemin/max 的值；
+ * 真正的下限还有一层：CSS 的 minmax(var(--pane-l-min), …) / minmax(var(--pane-r-min), 1fr)
+ * 是绝对像素，窄窗口下它比 18%/82% 更早生效。两层不搭起来的话，拖到边上会出现
+ * 「JS 说 82%、CSS 只给 76%，分隔条停住不跟手」，所以夹限由 splitBounds() 现算，
+ * 那几个像素值只写在 CSS 里，这边一律从计算样式读，不留第二份数字。
+ */
+const SPLIT = { min: 18, max: 82, dflt: 58, step: 2 };
+const mainEl = document.querySelector('main');
+const splitterEl = $('splitter');
+
+/** 当前左栏百分比（--split 是我们自己写在 main 上的内联变量） */
+function currentSplit() {
+  const raw = parseFloat(mainEl.style.getPropertyValue('--split'));
+  return Number.isFinite(raw) ? raw : SPLIT.dflt;
+}
+
+/**
+ * 量一次布局，算出「当前窗口下 CSS 真能兑现的百分比区间」。
+ * 左栏下限 = --pane-l-min；右栏 = 内容宽 - 左栏 - 分隔条 - 两道 gap，所以
+ * 左栏上限 = 内容宽 - --bar-w - 2×gap - --pane-r-min。
+ * 内容宽是百分比的解析基准（main 的宽减去左右 padding），不是窗口宽。
+ */
+function splitMetrics() {
+  const r = mainEl.getBoundingClientRect();
+  const cs = getComputedStyle(mainEl);
+  const padL = parseFloat(cs.paddingLeft) || 0;
+  const padR = parseFloat(cs.paddingRight) || 0;
+  const gap = parseFloat(cs.columnGap || cs.gap) || 0;
+  const px = (v, f) => { const n = parseFloat(cs.getPropertyValue(v)); return Number.isFinite(n) ? n : f; };
+  const content = r.width - padL - padR;
+  return {
+    left: r.left + padL, gap,
+    bar: px('--bar-w', splitterEl.offsetWidth),
+    minL: px('--pane-l-min', 0), minR: px('--pane-r-min', 0),
+    content: Number.isFinite(content) ? content : 0,
+  };
+}
+
+function splitBounds(m) {
+  const { content, bar, gap, minL, minR } = m;
+  if (!(content > 0)) return { min: SPLIT.min, max: SPLIT.max };
+  const lo = (minL / content) * 100;
+  const hi = ((content - bar - 2 * gap - minR) / content) * 100;
+  const min = Math.max(SPLIT.min, Math.min(lo, 50));
+  const max = Math.min(SPLIT.max, Math.max(hi, min));   /* 窗口窄到两层下限打架时，别造出空区间 */
+  return { min, max };
+}
+
+/** 设宽度；keep 为 true 时顺手存进本地（拖完/键盘调完才存，拖动过程中不存） */
+function setSplit(pct, keep) {
+  const m = splitMetrics();
+  const b = splitBounds(m);
+  const want = Number.isFinite(pct) ? pct : SPLIT.dflt;   /* 存档被改坏时退回默认，别写出 NaN% */
+  const v = Math.max(b.min, Math.min(b.max, want));
+  mainEl.style.setProperty('--split', v.toFixed(2) + '%');
+  splitterEl.setAttribute('aria-valuenow', String(Math.round(v)));
+  relayout();
+  if (keep) saveWorkspace();
+  return v;
+}
+
+/*
+ * 布局变了要让两个「自己管尺寸」的组件重新量一次：
+ *   Blockly 的 SVG 是注入时算的，它只监听 window resize，容器被我们改宽不会自愈，
+ *   不叫 Blockly.svgResize 一下就是一块空白 + 滚动手感错掉；
+ *   Ace 同理，靠 resize() 重算行列宽。
+ * 用 rAF 合并：一次拖动会连续触发几十个 pointermove，不必每帧都量。
+ */
+let relayoutQueued = false;
+function relayout() {
+  if (relayoutQueued) return;
+  relayoutQueued = true;
+  requestAnimationFrame(() => {
+    relayoutQueued = false;
+    try { if (typeof Blockly.svgResize === 'function') Blockly.svgResize(workspace); } catch (e) {}
+    try { srcEditor.resize(); } catch (e) {}
+  });
+}
+
+/**
+ * 把鼠标位置的横坐标换算成左栏百分比。
+ * padding、栏间距、条本身的宽度都从计算样式里读，不写死数字 —— 改 CSS 不用改这里。
+ * 目标是「分隔条的中心正好跟着光标」，所以要扣掉左边的间距和半个条宽；
+ * 除数是 main 的内容宽度（--split 这个百分比浏览器也是按它解析的）。
+ */
+function splitAtX(clientX) {
+  const m = splitMetrics();
+  if (!Number.isFinite(clientX) || !(m.content > 0)) return currentSplit();
+  const left = clientX - m.left - m.gap - m.bar / 2;
+  return (left / m.content) * 100;
+}
+
+let dragging = false;
+splitterEl.addEventListener('pointerdown', (e) => {
+  dragging = true;
+  splitterEl.classList.add('active');
+  document.body.classList.add('dragging');
+  if (splitterEl.setPointerCapture) splitterEl.setPointerCapture(e.pointerId);
+  e.preventDefault();                       /* 顺带压掉拖拽选中文字 */
+});
+splitterEl.addEventListener('pointermove', (e) => {
+  if (dragging) setSplit(splitAtX(e.clientX), false);
+});
+function endDrag(e) {
+  if (!dragging) return;
+  dragging = false;
+  splitterEl.classList.remove('active');
+  document.body.classList.remove('dragging');
+  if (e && e.pointerId !== undefined && splitterEl.releasePointerCapture) {
+    try { splitterEl.releasePointerCapture(e.pointerId); } catch (err) {}
+  }
+  saveWorkspace();                          /* 松手才存，拖一路存一路没意义 */
+}
+splitterEl.addEventListener('pointerup', endDrag);
+splitterEl.addEventListener('pointercancel', endDrag);
+window.addEventListener('blur', endDrag);   /* 拖到半路切走窗口，回来别卡在按住状态 */
+splitterEl.addEventListener('dblclick', () => {
+  setSplit(SPLIT.dflt, true);
+  say('左右比例回到默认 ' + SPLIT.dflt + '%', 'ok');
+});
+splitterEl.addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowLeft') { setSplit(currentSplit() - SPLIT.step, true); e.preventDefault(); }
+  else if (e.key === 'ArrowRight') { setSplit(currentSplit() + SPLIT.step, true); e.preventDefault(); }
+  else if (e.key === 'Home') { setSplit(SPLIT.dflt, true); e.preventDefault(); }
+});
+window.addEventListener('resize', relayout);
 
 /* ================================================================== */
 /* 4. 生成 + 诊断                                                      */
@@ -453,9 +628,26 @@ const dotEl = $('dot'), msgEl = $('msg');
 const runBtn = $('run'), stopBtn = $('stop');
 
 let decoder = null;
+function clearOutput() {
+  outEl.value = '';
+  outEl.scrollTop = 0;
+  $('outlen').textContent = '';
+}
 function newDecodeSession() {
   if (decoder) { try { outEl.value += decoder.decode(); } catch (e) {} }
   decoder = new TextDecoder('utf-8', { fatal: false });
+}
+/*
+ * 一轮运行的输出从空白开始。原先只有 pushBytes 一路 outEl.value += ，从来不清：
+ * 学生连点两次「编译并运行」就看到两遍一模一样的结果，第一反应是「程序怎么重复输出了」，
+ * 其实是上一轮的输出还留在框里。编译/运行失败的提示也走同一个 += ，所以清空放在
+ * 每轮开头，而不是把 += 改成赋值 —— 一次运行里 stdout 是分很多块回来的。
+ * 上一轮要是异常中断，解码器里可能还压着半截多字节字符，丢掉别混进这一轮。
+ */
+function beginOutput() {
+  decoder = null;
+  clearOutput();
+  newDecodeSession();
 }
 function pushBytes(bytes) {
   if (!decoder) newDecodeSession();
@@ -588,7 +780,7 @@ async function doRun() {
   runBtn.disabled = true; stopBtn.disabled = false;
   const t0 = performance.now();
   resetMetrics();
-  newDecodeSession();
+  beginOutput();
 
   try {
     /* 代码面板是手改过的就直接编；否则先按积木生成一遍 */
@@ -681,6 +873,8 @@ function saveWorkspace() {
       localStorage.setItem(LS.stdin, stdinEl.value);
       localStorage.setItem(LS.opts, JSON.stringify({
         lang: langKey(),
+        theme: themeKey(),
+        split: currentSplit(),
         std: $('std').value, opt: $('opt').value, annotate: $('annotate').checked,
         timeout: $('timeout').value,
       }));
@@ -730,8 +924,8 @@ function download(name, text, mime) {
 
 runBtn.onclick = doRun;
 stopBtn.onclick = stopAll;
-$('reload').onclick = () => { outEl.value = ''; $('outlen').textContent = ''; startCompileWorker(); };
-$('clearout').onclick = () => { outEl.value = ''; $('outlen').textContent = ''; };
+$('reload').onclick = () => { clearOutput(); startCompileWorker(); };
+$('clearout').onclick = clearOutput;
 $('regen').onclick = () => { markGeneratedClean(); regenerate(); say('已按当前积木重新生成代码', 'ok'); };
 $('save').onclick = () => {
   saveWorkspace();
@@ -782,6 +976,13 @@ $('lang').addEventListener('change', () => {
 });
 
 stdinEl.addEventListener('input', saveWorkspace);
+
+/* 白天 / 夜晚：勾上就是白天。只换配色，不动积木、代码和编译参数。 */
+$('theme').addEventListener('change', () => {
+  const key = applyTheme(themeKey());
+  saveWorkspace();
+  say('已切到' + THEMES[key].label + '模式（配色整套换，积木画布始终是浅底）', 'ok');
+});
 
 document.addEventListener('keydown', (e) => {
   if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); doRun(); }
@@ -835,6 +1036,15 @@ function stateLooksSane(state) {
   if (opts.lang === 'c' || opts.lang === 'cpp') $('lang').value = opts.lang;
   fillStd(false);
   refreshSourceCaption();
+  /*
+   * 主题：<head> 那段脚本已经按同一个存档把 .day 挂上了，这里只是把复选框和
+   * Ace 主题对齐（存档读不出来时，退回到看 <html> 上有没有 .day）。
+   */
+  applyTheme(opts.theme === 'day' || opts.theme === 'night'
+    ? opts.theme
+    : (document.documentElement.classList.contains('day') ? 'day' : 'night'));
+  /* 左右比例：存档里是个 0~100 的百分比，setSplit 自己会夹回 18~82 */
+  setSplit(Number.isFinite(opts.split) ? opts.split : SPLIT.dflt, false);
   if (opts.std && LANGS[langKey()].stds.some((p) => p[0] === opts.std)) $('std').value = opts.std;
   if (opts.opt) $('opt').value = opts.opt;
   if (opts.timeout) $('timeout').value = opts.timeout;

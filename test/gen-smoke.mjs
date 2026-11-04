@@ -217,6 +217,33 @@ cases.push({
   })],
 });
 
+/* 文本变量：C 里是 char[256]，C++ 里是 std::string —— 同一批积木，两套写法 */
+cases.push({
+  name: '文本变量（C 的 char[256] / C++ 的 std::string）',
+  roots: [blk('main', {}, {
+    BODY: [
+      blk('var_decl', { TYPE: 'string', NAME: 's' }, { INIT: text('hi') }),
+      blk('var_decl', { TYPE: 'string', NAME: 't' }, {}),
+      blk('var_set', { VAR: 't' }, { VALUE: vget('s') }),
+      blk('read', { VAR: 't' }, {}),
+      blk('print', { NL: 'TRUE' }, { MSG: vget('t') }),
+      blk('printf', { FMT: '[%s]\\n' }, { ARG0: vget('s') }),
+      blk('scanf', { FMT: '%s' }, { ARG0: vget('s') }),
+    ],
+  })],
+});
+cases[4].expect = [
+  'char s[256] = "hi";',
+  'char t[256];',
+  'strcpy(t, s);',
+  'scanf("%255s", t);',
+  'printf("%s\\n", t);',
+  'printf("[%s]\\n", s);',
+  'scanf("%255s", s);',
+  '#include <string.h>',
+];
+cases[4].expectDiag = ['%s 已自动写成 %255s'];
+
 /* 关键断言：生成出来的代码应当长这样 */
 cases[0].expect = [
   'printf("你好，C！\\n");',
@@ -468,6 +495,163 @@ console.log('\n══════ C++ 模式 ══════');
   })]);
   const r = CGen.generate(ws, { annotate: false });
   check('默认仍是 C（printf + <stdio.h>）', r.code.includes('printf("hi\\n");') && r.lang === 'c');
+}
+
+/* ---------------- 文本变量：C 的 char[256] vs C++ 的 std::string ---------------- */
+console.log('\n══════ 文本变量 ══════');
+{
+  const r = cOut[4];
+  check('C 不带 <string>（那是 C++ 的头）', !r.code.includes('#include <string>'));
+  check('C 的文本变量前面不会莫名多出 &', !/&\bs\b/.test(r.code));
+  check('C：printf 的 %s 直接用数组名，不补 .c_str()', r.code.includes('printf("[%s]\\n", s);') && !r.code.includes('c_str'));
+  check('C：文本没有初始化值时只出 char t[256];', r.code.includes('char t[256];'));
+  check('C：缓冲区大小写进提示里', r.diagnostics.some((d) => d.sev === 'info' && /256 字节的字符数组，最多存 255 个字符/.test(d.msg)));
+}
+{
+  const r = cppOut[4];
+  check('C++ 声明文本变量出 std::string s = "hi"', r.code.includes('std::string s = "hi";'));
+  check('C++ 的 std::string 必须带 #include <string>', r.code.includes('#include <string>'));
+  check('C++ 文本赋值直接用 =', r.code.includes('t = s;'));
+  check('C++ 读文本用 std::cin >> t（不带格式符和 &）', r.code.includes('std::cin >> t;'));
+  check('cout 输出文本变量不加 .c_str()', r.code.includes('std::cout << t << std::endl;'));
+  check('printf 的 %s 配 std::string 自动补 .c_str()', r.code.includes('printf("[%s]\\n", s.c_str());'));
+  check('拼接结果再进 %s 会先加括号：(a + b).c_str()',
+    (() => {
+      const w = workspace([blk('main', {}, {
+        BODY: [
+          blk('var_decl', { TYPE: 'string', NAME: 'a' }, {}),
+          blk('var_decl', { TYPE: 'string', NAME: 'b' }, {}),
+          blk('printf', { FMT: '%s\\n' }, { ARG0: blk('arith', { OP: '+' }, { A: vget('a'), B: vget('b') }, true) }),
+        ],
+      })]);
+      const g = CGen.generate(w, { annotate: false, lang: 'cpp' });
+      return g.code.includes('printf("%s\\n", (a + b).c_str());') && !g.hasError;
+    })());
+  check('scanf 的 %s 配 std::string 报错并指向「读入到变量」',
+    r.diagnostics.some((d) => d.sev === 'error' && /%s 不能往文本变量「s」里写/.test(d.msg) && /std::cin >> s/.test(d.msg)));
+  check('C++ 模式不带 <string.h> 也不出 strcpy', !r.code.includes('#include <string.h>') && !r.code.includes('strcpy'));
+  check('cin >> 文本会提示「只读到一个词」', r.diagnostics.some((d) => d.sev === 'info' && /遇到空格、Tab 或换行就停/.test(d.msg)));
+}
+{
+  /* 拼接与判等：C++ 按内容走，C 一律拦下 */
+  const mk = () => workspace([blk('main', {}, {
+    BODY: [
+      blk('var_decl', { TYPE: 'string', NAME: 's' }, { INIT: text('hello') }),
+      blk('print', { NL: 'TRUE' }, { MSG: blk('arith', { OP: '+' }, { A: vget('s'), B: text('!') }, true) }),
+      blk('if', {}, {
+        COND: blk('compare', { OP: '==' }, { A: vget('s'), B: text('hello') }, true),
+        DO: [blk('print', { NL: 'TRUE' }, { MSG: text('对了') })],
+      }),
+    ],
+  })]);
+  const c1 = CGen.generate(mk(), { annotate: false, lang: 'cpp' });
+  const c0 = CGen.generate(mk(), { annotate: false, lang: 'c' });
+  check('C++：s + "!" 直接出拼接，不需要额外调用', c1.code.includes('std::cout << s + "!" << std::endl;') && !c1.hasError);
+  check('C++：s == "hello" 比的是内容，照常出代码', c1.code.includes('if (s == "hello")'));
+  check('C：文本相加报错', c0.diagnostics.some((d) => d.sev === 'error' && /文本不能参与/.test(d.msg)));
+  check('C：文本比较报错（比的是地址）', c0.diagnostics.some((d) => d.sev === 'error' && /比的是地址/.test(d.msg)));
+  check('C：报错里给出路（strcmp 没有 / 切 C++）',
+    c0.diagnostics.some((d) => /strcmp/.test(d.msg) && /切到 C\+\+ 用 std::string/.test(d.msg)));
+}
+{
+  /* 超长文本：C 那块 256 字节的缓冲区装不下，C++ 的 std::string 自己会扩 */
+  const mk = () => workspace([blk('main', {}, {
+    BODY: [blk('var_decl', { TYPE: 'string', NAME: 's' }, { INIT: text('中'.repeat(100)) })],
+  })]);
+  const c0 = CGen.generate(mk(), { annotate: false, lang: 'c' });
+  const c1 = CGen.generate(mk(), { annotate: false, lang: 'cpp' });
+  check('C：100 个汉字按 UTF-8 算 300 字节，超出缓冲区就报错',
+    c0.diagnostics.some((d) => d.sev === 'error' && /要占 300 字节/.test(d.msg)));
+  check('C++：同样的文本不报错', !c1.hasError);
+}
+{
+  /* 函数收发文本：C++ 可以，C 报错并说明为什么 */
+  const mk = () => workspace([
+    blk('func_def', { NAME: 'greet', RET: 'string', NP: '1', P0_T: 'string', P0_N: 'who' }, {
+      BODY: [blk('return', {}, { VALUE: vget('who') })],
+    }),
+    blk('main', {}, {
+      BODY: [
+        blk('var_decl', { TYPE: 'string', NAME: 's' }, { INIT: text('hi') }),
+        blk('print', { NL: 'TRUE' }, { MSG: blk('call', { NAME: 'greet' }, { ARG0: vget('s') }, true) }),
+      ],
+    }),
+  ]);
+  const c1 = CGen.generate(mk(), { annotate: false, lang: 'cpp' });
+  const c0 = CGen.generate(mk(), { annotate: false, lang: 'c' });
+  check('C++ 原型出 std::string greet(std::string who)', c1.code.includes('std::string greet(std::string who);'));
+  check('C++ 里文本能进能出函数，全程无 error', !c1.hasError && c1.code.includes('std::cout << greet(s) << std::endl;'));
+  check('C：文本参数和文本返回值各报一条，不多不少',
+    c0.diagnostics.filter((d) => d.sev === 'error').length === 2
+    && c0.diagnostics.some((d) => /退化成指针/.test(d.msg))
+    && c0.diagnostics.some((d) => /悬空指针/.test(d.msg)));
+  check('C：数字实参传给文本形参会报错',
+    (() => {
+      const w = workspace([
+        blk('func_def', { NAME: 'shout', RET: 'void', NP: '1', P0_T: 'string', P0_N: 'who' }, {
+          BODY: [blk('print', { NL: 'TRUE' }, { MSG: vget('who') })],
+        }),
+        blk('main', {}, { BODY: [blk('call', { NAME: 'shout' }, { ARG0: num(1) })] }),
+      ]);
+      const g = CGen.generate(w, { annotate: false, lang: 'cpp' });
+      return g.diagnostics.some((d) => d.sev === 'error' && /形参 who 是文本，实参 1 却是 int/.test(d.msg));
+    })());
+}
+{
+  /* 格式符配错：文本变量遇上 %d / %c / scanf %d */
+  const w = workspace([blk('main', {}, {
+    BODY: [
+      blk('var_decl', { TYPE: 'string', NAME: 's' }, {}),
+      blk('var_decl', { TYPE: 'int', NAME: 'n' }, {}),
+      blk('printf', { FMT: '%d %c' }, { ARG0: vget('s'), ARG1: vget('s') }),
+      blk('scanf', { FMT: '%d' }, { ARG0: vget('s') }),
+      blk('scanf', { FMT: '%s' }, { ARG0: vget('n') }),
+    ],
+  })]);
+  const r = CGen.generate(w, { annotate: false, lang: 'c' });
+  check('%d 配文本变量报错', r.diagnostics.some((d) => d.sev === 'error' && /%d 要整数，第 1 个参数是文本/.test(d.msg)));
+  check('%c 配文本变量报错（那是单个字符）', r.diagnostics.some((d) => d.sev === 'error' && /%c 打印的是单个字符/.test(d.msg)));
+  check('scanf 用 %d 往文本变量里写报错', r.diagnostics.some((d) => d.sev === 'error' && /个目标是文本，不能用 %d 读入/.test(d.msg)));
+  check('scanf 的 %s 配 int 变量报错（要的是字符数组）', r.diagnostics.some((d) => d.sev === 'error' && /%s 要的是字符数组名.*第 1 个槽放的是 int/.test(d.msg)));
+  check('已经写了宽度的 %s 不重复加宽度',
+    (() => {
+      const w2 = workspace([blk('main', {}, {
+        BODY: [
+          blk('var_decl', { TYPE: 'string', NAME: 's' }, {}),
+          blk('scanf', { FMT: '%20s' }, { ARG0: vget('s') }),
+        ],
+      })]);
+      const g = CGen.generate(w2, { annotate: false, lang: 'c' });
+      return g.code.includes('scanf("%20s", s);') && !/%255s/.test(g.code);
+    })());
+  check('宽度写得比缓冲区还大要报错',
+    (() => {
+      const w2 = workspace([blk('main', {}, {
+        BODY: [
+          blk('var_decl', { TYPE: 'string', NAME: 's' }, {}),
+          blk('scanf', { FMT: '%9999s' }, { ARG0: vget('s') }),
+        ],
+      })]);
+      const g = CGen.generate(w2, { annotate: false, lang: 'c' });
+      return g.diagnostics.some((d) => d.sev === 'error' && /宽度 9999 比 256 字节的缓冲区还大/.test(d.msg));
+    })());
+}
+{
+  /* 数值变量遇上文本：报错要说清「换成文本类型」而不是丢一句类型不符 */
+  const w = workspace([blk('main', {}, {
+    BODY: [
+      blk('var_decl', { TYPE: 'int', NAME: 'x' }, { INIT: text('abc') }),
+      blk('var_decl', { TYPE: 'char', NAME: 'c' }, {}),
+      blk('var_set', { VAR: 'c' }, { VALUE: text('abc') }),
+      blk('var_set', { VAR: 'x' }, { VALUE: blk('char_lit', { CH: 'A' }, {}, true) }),
+    ],
+  })]);
+  const r = CGen.generate(w, { annotate: false, lang: 'c' });
+  check('int 变量用文本初始化：报错并提示换成文本类型',
+    r.diagnostics.some((d) => d.sev === 'error' && /是 int，不能直接存放整块文本/.test(d.msg) && /把类型换成「文本」/.test(d.msg)));
+  check('char 变量赋整块文本：提示改用「字符」积木',
+    r.diagnostics.some((d) => d.sev === 'error' && /单个字符请用「字符」积木/.test(d.msg)));
+  check('int 变量赋单个字符仍然正常（跟文本无关，不该被文本规则误伤）', r.code.includes('x = \'A\';'));
 }
 
 console.log('\n' + (fails ? '✗ ' + fails + ' 项不通过' : '✓ 全部断言通过'));

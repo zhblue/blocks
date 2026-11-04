@@ -11,7 +11,9 @@
  * 语言由 opts.lang 决定：'cpp' / 'c++' 出 C++（std::cout、std::cin、按需带
  * <iostream>），其它一律按 C 出（printf/scanf、<stdio.h>、bool 需要 <stdbool.h>）。
  * 不传 opts.lang 时保持 C —— 老调用方（测试脚本）的行为不变。
- * 两种语言共用同一套「原生数组 + C 风格强制转换」的写法，不引入 STL 类型。
+ * 除「文本」变量外，两种语言共用同一套「原生数组 + C 风格强制转换」的写法：
+ *   C++ 的文本变量出 std::string（按需带 <string>）；
+ *   C   的文本变量出 char 名[256]，整块数组名就是字符串（赋值走 strcpy，读入带 %255s 上限）。
  *
  * 设计原则：宁可在生成阶段把话说清楚，也不让 clang 抛一句看不懂的报错。
  */
@@ -32,6 +34,34 @@
 
   const PF = { int: '%d', double: '%g', char: '%c', bool: '%d' };   /* 自动输出积木用 */
   const SF = { int: '%d', double: '%lf', char: ' %c' };             /* 自动读入积木用 */
+
+  /*
+   * 「文本」有三种类型标签，别混成一个：
+   *   string —— 「文本」积木的字面量，两种语言里都是 "abc"（C++ 里是 const char*）
+   *   stdstr —— C++ 模式的文本变量，std::string
+   *   cstr   —— C 模式的文本变量，char[256]，数组名本身就是字符串
+   * 判断「是不是一整块文本」一律用 isStr()，只关心其中某一种的再单独比标签。
+   */
+  const CSTR_CAP = 256;          /* C 模式文本变量的缓冲区：最后一格留给 \0 */
+  const CSTR_MAX = CSTR_CAP - 1; /* 能放进去的最多字符数，也是 scanf 的宽度上限 */
+  function isStr(t) { return t === 'string' || t === 'stdstr' || t === 'cstr'; }
+
+  /* 诊断信息里的类型名：内部标签（stdstr/cstr）别直接印给学生 */
+  const TYPE_CN = {
+    int: 'int', double: 'double', char: 'char', bool: 'bool',
+    string: '文本', stdstr: '文本 std::string', cstr: '文本 char[]',
+  };
+  const tName = (t) => TYPE_CN[t] || t;
+
+  /** 一段文本按 UTF-8 编出来占几字节（积木里打中文时，一个汉字是 3 字节） */
+  function utf8Len(s) {
+    let n = 0;
+    for (const ch of s) {
+      const c = ch.codePointAt(0);
+      n += c < 0x80 ? 1 : c < 0x800 ? 2 : c < 0x10000 ? 3 : 4;
+    }
+    return n;
+  }
 
   const SPEC_GROUP = {
     d: 'int', i: 'int', u: 'int', o: 'int', x: 'int', X: 'int',
@@ -81,10 +111,39 @@
     let m;
     while ((m = re.exec(fmt)) !== null) {
       if (m[2] === '%') continue;
-      specs.push({ conv: m[2], mod: m[1], at: m.index, text: m[0] });
+      /* m[1] 再拆成标志 / 宽度 / 精度 / 长度修饰符：给 %s 补宽度上限时要用 */
+      const p = /^([-+ #0]*)([0-9]*)((?:\.[0-9]+)?)([hlLjzt]*)$/.exec(m[1]);
+      specs.push({
+        conv: m[2], mod: m[1], at: m.index, text: m[0],
+        flags: p[1], width: p[2], prec: p[3], len: p[4],
+      });
     }
     const stray = fmt.replace(re, '').indexOf('%') >= 0;
     return { specs, stray };
+  }
+
+  /**
+   * scanf 的 %s 必须带宽度：scanf("%s", buf) 是最经典的缓冲区溢出写法，
+   * 学生输入 300 个字符就会写穿那个 256 字节的数组。
+   * 已经写了宽度的（%20s）照原样保留，只判断它是否超过缓冲区。
+   */
+  function widthSpec(sp, cap) {
+    if (sp.width) return { text: sp.text, tooBig: parseInt(sp.width, 10) > cap };
+    /* C 的宽度写在标志之后、精度和长度修饰符之前：%s → %255s，%-10s → %-10s */
+    return { text: '%' + sp.flags + cap + sp.prec + sp.len + sp.conv, tooBig: false };
+  }
+
+  /** 按 specs 的位置把若干说明符换成新写法，拼回完整格式串 */
+  function patchFormat(fmt, specs, edits) {
+    let out = '';
+    let at = 0;
+    for (let i = 0; i < specs.length; i++) {
+      const sp = specs[i];
+      out += fmt.slice(at, sp.at);
+      out += edits[i] !== undefined ? edits[i] : sp.text;
+      at = sp.at + sp.text.length;
+    }
+    return out + fmt.slice(at);
   }
 
   /* ================================================================== */
@@ -119,6 +178,16 @@
    */
   function streamExpr(e) { return wrap(e, P_ADD); }
 
+  /**
+   * 在表达式后面接 .c_str() 这类「紧跟其后」的东西。
+   * 成员访问比任何运算符都紧，所以只有原子级表达式能裸着接：
+   *   s        →  s.c_str()
+   *   a + b    →  (a + b).c_str()      —— 写成 a + b.c_str() 就变成「a 加上 b 的 C 指针」
+   */
+  function memberExpr(e, suffix) {
+    return wrap(e, P_ATOM) + suffix;
+  }
+
   /* ================================================================== */
   /* 生成器主体                                                          */
   /* ================================================================== */
@@ -129,8 +198,18 @@
        默认保持 C，这样不带参数调用（测试、老链接）的行为不变。 */
     const cpp = o.lang === 'cpp' || o.lang === 'c++';
     const diags = [];
-    const used = { stdbool: false, cstdio: false, iostream: false };
+    const used = { stdbool: false, cstdio: false, iostream: false, string: false, cstring: false };
     let seq = 0;
+
+    /* 积木下拉里的 'string'（文本）落到具体语言时变成各自的标签：
+       C++ 是 std::string 对象，C 是 char[256] 缓冲区。 */
+    const tagOf = (t) => (t === 'string' ? (cpp ? 'stdstr' : 'cstr') : t);
+    /** 声明/形参里写的类型名 */
+    const spellOf = (t) => (t === 'stdstr' ? 'std::string' : t === 'cstr' ? 'char' : t);
+    /** 形参的完整写法：C 的文本参数是数组，声明里带上长度（收到的是指针，长度只是注释意义） */
+    const paramDecl = (p) => (p.type === 'cstr'
+      ? 'char ' + p.name + '[' + CSTR_CAP + ']'
+      : spellOf(p.type) + ' ' + p.name);
 
     const diag = (sev, msg, block) => {
       diags.push({ sev, msg, blockId: block ? block.id : null, label: block ? blockLabel(block) : '' });
@@ -185,12 +264,30 @@
     for (const d of funcs.values()) funcOrder.push(d);
     for (const d of funcOrder) {
       d.name = checkName(d.block.getFieldValue('NAME'), '函数', d.block);
+      d.ret = tagOf(String(d.block.getFieldValue('RET') || 'void'));
       const seen = new Set();
       for (const p of d.params) {
+        p.type = tagOf(p.type);
         const n = checkName(p.name, '参数', d.block);
         if (n) p.name = n;
         if (seen.has(p.name)) err('函数 ' + d.name + ' 的形参名重复：' + p.name + '。', d.block);
         seen.add(p.name);
+      }
+      if (!cpp) {
+        /* C 里文本 = 一块 char 数组，它不能当函数返回值，也不适合当参数（见下面的理由）。
+           C++ 的 std::string 是真正的值类型，这两件事都照写不误。 */
+        if (d.ret === 'cstr') {
+          err('函数 ' + d.name + ' 想返回一整块文本，但 C 做不到：那块字符数组是函数里的局部变量，'
+            + '函数一返回内存就没了，递出去的只是悬空指针。要返回文本请切到 C++（std::string），'
+            + '或者把缓冲区当参数交给函数、由调用方持有。', d.block);
+        }
+        for (const p of d.params) {
+          if (p.type !== 'cstr') continue;
+          err('函数 ' + d.name + ' 的文本参数「' + p.name + '」在 C 里会退化成指针：'
+            + '函数收不到「这块缓冲区有多大」，往里写满 ' + CSTR_MAX + ' 个字符就可能越界。'
+            + '本版积木因此不支持 C 的文本参数 —— 切到 C++ 用 std::string（长度自己带着），'
+            + '或者改用 int / char 参数。', d.block);
+        }
       }
     }
 
@@ -264,7 +361,7 @@
 
         case 'text': {
           const s = unescapeUser(String(block.getFieldValue('TEXT') || ''));
-          return { code: '"' + escapeC(s, true) + '"', type: 'string', prec: P_ATOM };
+          return { code: '"' + escapeC(s, true) + '"', type: 'string', prec: P_ATOM, bytes: utf8Len(s) };
         }
 
         case 'char_lit': {
@@ -335,13 +432,24 @@
           const a = sub(block.getInputTargetBlock('A'), ctx, block);
           const b = sub(block.getInputTargetBlock('B'), ctx, block);
           if (!a || !b) return { code: '0', type: 'int', prec: P_ATOM };
-          if (a.type === 'string' || b.type === 'string') {
-            err('字符串不能参与算术运算（C 的字符串不是数值）。要比较文本请用 strcmp，本版积木暂未提供。', block);
-          }
           const op = block.getFieldValue('OP');
+          /* C++ 的 std::string 可以相加，这是「拼文本」唯一的合法写法，且至少一边得是文本变量：
+             "a" + "b" 是两个指针相加，编译不过；s + 5 会被当成「追加字符码 5」，不是加 5。 */
+          if (op === '+' && (a.type === 'stdstr' || b.type === 'stdstr')) {
+            if (isStr(a.type) && isStr(b.type)) {
+              return { code: wrap(a, P_ADD) + ' + ' + wrap(b, P_ADD), type: 'stdstr', prec: P_ADD };
+            }
+            err('拼文本只能「文本 + 文本」：这边是 ' + tName(isStr(a.type) ? b.type : a.type)
+              + '。数字要接在文本后面得先转成文本（C++ 用 std::to_string），本版积木还没有它；'
+              + '想直接打印出来，用「输出」积木连着输出就行。', block);
+          } else if (isStr(a.type) || isStr(b.type)) {
+            err(cpp
+              ? '文本不能参与 ' + op + ' 运算：std::string 只支持用 + 拼接，而且得有一边是文本变量。'
+              : '文本不能参与算术运算（C 的字符串不是数值）。要比较文本请用 strcmp，本版积木暂未提供。', block);
+          }
           const type = op === '/' && a.type === 'int' && b.type === 'int'
             ? 'int'
-            : promote(a.type === 'string' ? 'int' : a.type, b.type === 'string' ? 'int' : b.type);
+            : promote(isStr(a.type) ? 'int' : a.type, isStr(b.type) ? 'int' : b.type);
           const prec = (op === '*' || op === '/' || op === '%') ? P_MUL : P_ADD;
           if (op === '%' && (a.type === 'double' || b.type === 'double')) {
             err('取余 %% 只能用于整数；右边是小数，请先用「值类型转换」取整。', block);
@@ -366,7 +474,7 @@
         case 'not': {
           const a = sub(block.getInputTargetBlock('A'), ctx, block);
           if (!a) return { code: '0', type: 'int', prec: P_ATOM };
-          if (a.type === 'string') err('不能对文本取逻辑非。', block);
+          if (isStr(a.type)) err('不能对文本取逻辑非。', block);
           return { code: '!' + wrap(a, P_ATOM), type: 'int', prec: P_ATOM };
         }
 
@@ -374,7 +482,7 @@
           const a = sub(block.getInputTargetBlock('A'), ctx, block);
           const to = block.getFieldValue('TO');
           if (!a) return { code: '0', type: to, prec: P_ATOM };
-          if (a.type === 'string') { err('不能把文本转成 ' + to + '（C 的字符串不是数值）。', block); }
+          if (isStr(a.type)) { err('不能把文本转成 ' + to + '（C 的字符串不是数值）。', block); }
           else if (to === 'int' && a.type === 'double') {
             info('(int) 是截断取整，不是四舍五入：3.9 变 3，-3.9 变 -3。', block);
           }
@@ -386,8 +494,24 @@
           const b = sub(block.getInputTargetBlock('B'), ctx, block);
           if (!a || !b) return { code: '0', type: 'int', prec: P_ATOM };
           const op = block.getFieldValue('OP');
-          if (a.type === 'string' || b.type === 'string') {
-            err('文本之间不能用 ' + op + ' 比较：C 里这样比的是地址。要比较字符串请用 strcmp（本版积木暂未提供）。', block);
+          if (isStr(a.type) || isStr(b.type)) {
+            const bothStr = isStr(a.type) && isStr(b.type);
+            /* 只有真对象（std::string）参与的比较才看内容；字面量在 C++ 里是 const char*，
+               两边都是字面量时比的是地址。C 里的文本是数组，同样只能比出地址。 */
+            const byValue = a.type === 'stdstr' || b.type === 'stdstr';
+            if (!bothStr) {
+              err('文本只能和文本比较：另一边是 ' + tName(isStr(a.type) ? b.type : a.type) + '。', block);
+            } else if (!byValue) {
+              if (cpp) {
+                err('两块「文本」积木不能用 ' + op + ' 比：C++ 里字面量比的是指针地址，看不出内容是否相同。'
+                  + '把其中一边换成文本变量（std::string），' + op + ' 比的就是内容。', block);
+              } else {
+                err('文本之间不能用 ' + op + ' 比较：C 里这样比的是地址。要比内容请用 strcmp（本版积木暂未提供），'
+                  + '或者切到 C++ 用 std::string —— 那里的 ' + op + ' 比的就是内容。', block);
+              }
+            } else {
+              return { code: wrap(a, P_ADD) + ' ' + op + ' ' + wrap(b, P_ADD), type: 'int', prec: P_CMP };
+            }
           }
           if (op === '==' && (a.type === 'double' || b.type === 'double')) {
             warn('小数很难正好相等（0.1 + 0.2 不等于 0.3）。判等建议改成「差的绝对值小于一个很小的数」。', block);
@@ -401,7 +525,7 @@
           if (!a || !b) return { code: '0', type: 'int', prec: P_ATOM };
           const op = block.getFieldValue('OP');
           for (const side of [a, b]) {
-            if (side.type === 'string') err('「且 / 或」两边必须是条件或整数，文本不行。', block);
+            if (isStr(side.type)) err('「且 / 或」两边必须是条件或整数，文本不行。', block);
           }
           const prec = op === '&&' ? P_AND : P_OR;
           return {
@@ -440,7 +564,7 @@
         info('数组下标必须是整数，已自动加 (int) 截断：' + arrName + '[(int)(' + top(e) + ')]。', block);
         return '(int)(' + top(e) + ')';
       }
-      if (e.type === 'string') { err('数组下标不能是文本。', block); return '0'; }
+      if (isStr(e.type)) { err('数组下标不能是文本。', block); return '0'; }
       return top(e);
     }
 
@@ -469,8 +593,15 @@
         const p = d.params[i];
         const a = args[i];
         if (!a) { parts.push('0'); continue; }
-        if (a.e.type === 'string') {
-          err('实参 ' + (i + 1) + ' 是文本，但形参 ' + p.name + ' 是 ' + p.type + '（本版积木不能把字符串传进函数）。', a.block);
+        if (isStr(p.type)) {
+          /* C++：文本字面量和 std::string 都能隐式转换成形参的 std::string，直接传名字即可；
+             C 的文本参数已经在函数定义处报过错了，这里不再重复一次。 */
+          if (!isStr(a.e.type)) {
+            err('形参 ' + p.name + ' 是文本，实参 ' + (i + 1) + ' 却是 ' + tName(a.e.type) + '。', a.block);
+          }
+        } else if (isStr(a.e.type)) {
+          err('实参 ' + (i + 1) + ' 是文本，但形参 ' + p.name + ' 是 ' + tName(p.type)
+            + '（文本塞不进数值格子）。', a.block);
         } else if (p.type === 'int' && a.e.type === 'double') {
           warn('传给 ' + fname + ' 的第 ' + (i + 1) + ' 个参数是小数，形参是 int，会截掉小数部分。', a.block);
         }
@@ -482,7 +613,11 @@
       return { code: fname + '(' + parts.join(', ') + ')', type: d.ret === 'void' ? 'int' : d.ret, prec: P_ATOM };
     }
 
-    /** scanf 槽位：只接受变量 / 数组元素，直接返回写好 & 的地址表达式 */
+    /**
+     * scanf 槽位：只接受变量 / 数组元素，返回写好的地址表达式。
+     * C 的文本变量是个 char 数组，数组名本身就是首元素地址，不能再加 &；
+     * 顺带把这块缓冲区能装多少个字符（cap）交出去，%s 才有宽度可写。
+     */
     function addrOf(block, ctx) {
       if (!block) return null;
       const k = block.cKind;
@@ -492,6 +627,8 @@
         const v = lookup(ctx, name);
         if (!v) { err('scanf 要写进变量「' + name + '」，但它在这里不可见。', block); return null; }
         if (v.kind === 'array') { err('%s 之类需要字符数组的名字，本版积木暂不支持把整个数组传进 scanf。', block); return null; }
+        if (v.type === 'cstr') return { code: name, type: 'cstr', cap: CSTR_MAX, block: block };
+        if (v.type === 'stdstr') return { code: name, type: 'stdstr', block: block };
         return { code: '&' + name, type: v.type, block: block };
       }
       if (k === 'arr_get') {
@@ -551,29 +688,61 @@
 
         case 'var_decl': {
           const name = checkName(block.getFieldValue('NAME'), '变量', block);
-          const type = block.getFieldValue('TYPE');
+          const type = tagOf(String(block.getFieldValue('TYPE') || 'int'));
           if (type === 'bool') used.stdbool = true;
+          if (type === 'stdstr') used.string = true;
           const initB = block.getInputTargetBlock('INIT');
           let rhs = '';
+          let copyFrom = null;      /* C 模式：用另一块文本初始化，只能先声明再 strcpy */
           if (initB) {
             const e = E(initB, ctx);
-            if (e.type === 'string') {
-              err('变量「' + name + '」是 ' + type + '，不能直接存放文本（C 的字符串要配字符数组）。', initB);
-            } else if (type === 'int' && e.type === 'double') {
-              warn('用小数初始化 int 变量会截断小数部分；要保留小数请把类型改成 double。', block);
-            } else if (type === 'double' && (e.type === 'int' || e.type === 'char' || e.type === 'bool')) {
-              /* 隐式提升，安全 */
-            } else if (type === 'char' && e.type !== 'char') {
-              warn('把 ' + e.type + ' 存进 char 只留低 8 位，中文/大数会变样。', block);
-            } else if (type === 'bool' && e.type !== 'bool' && e.type !== 'int') {
-              warn('bool 变量按 0 / 非 0 规则赋值。', block);
+            if (isStr(e.type) !== isStr(type)) {
+              if (isStr(type)) {
+                err('文本变量「' + name + '」的初始值得是一段文本，现在是 ' + tName(e.type)
+                  + '。' + (type === 'cstr' ? '单个字符请写进 char 变量。' : ''), initB);
+              } else {
+                err('变量「' + name + '」是 ' + tName(type) + '，不能直接存放整块文本。'
+                  + (type === 'char' ? '单个字符请用「字符」积木，整段文本请把类型换成「文本」。'
+                    : '要存整段文本请把类型换成「文本」。'), initB);
+              }
+            } else if (isStr(type)) {
+              if (type === 'cstr' && e.type === 'cstr') {
+                copyFrom = top(e);          /* char a[256] = b; 在 C 里不合法，得 strcpy */
+              } else {
+                if (type === 'cstr' && e.type === 'string' && e.bytes > CSTR_MAX) {
+                  err('「' + name + '」是 ' + CSTR_CAP + ' 字节的缓冲区，这段文本要占 ' + e.bytes
+                    + ' 字节（再加结尾的 \\0），放不进去。', initB);
+                }
+                rhs = ' = ' + top(e);
+              }
+            } else {
+              /* 数值类型：先按类型收窄诊断，再把初始值照常写出去 */
+              if (type === 'int' && e.type === 'double') {
+                warn('用小数初始化 int 变量会截断小数部分；要保留小数请把类型改成 double。', block);
+              } else if (type === 'double' && (e.type === 'int' || e.type === 'char' || e.type === 'bool')) {
+                /* 隐式提升，安全 */
+              } else if (type === 'char' && e.type !== 'char') {
+                warn('把 ' + e.type + ' 存进 char 只留低 8 位，中文/大数会变样。', block);
+              } else if (type === 'bool' && e.type !== 'bool' && e.type !== 'int') {
+                warn('bool 变量按 0 / 非 0 规则赋值。', block);
+              }
+              rhs = ' = ' + top(e);
             }
-            rhs = ' = ' + top(e);
-          } else if (type === 'bool') {
-            used.stdbool = true;
           }
           declare(ctx, name, type, 'var', block);
-          line(ctx, type + ' ' + name + rhs + ';', block);
+          if (type === 'stdstr') {
+            line(ctx, 'std::string ' + name + rhs + ';', block);
+          } else if (type === 'cstr') {
+            line(ctx, 'char ' + name + '[' + CSTR_CAP + ']' + rhs + ';', block);
+            if (copyFrom !== null) {
+              used.cstring = true;
+              line(ctx, 'strcpy(' + name + ', ' + copyFrom + ');', block);
+            }
+            info('「' + name + '」是 ' + CSTR_CAP + ' 字节的字符数组，最多存 ' + CSTR_MAX
+              + ' 个字符，最后一格留给结束符 \\0；一个汉字占 3 字节，装不了多少。', block);
+          } else {
+            line(ctx, type + ' ' + name + rhs + ';', block);
+          }
           return;
         }
 
@@ -596,13 +765,33 @@
           if (!name || name === '__none__') { err('这块「赋值」积木还没选要写哪个变量。', block); return; }
           const v = lookup(ctx, name);
           const e = sub(block.getInputTargetBlock('VALUE'), ctx, block);
+          let stmt = name + ' = ' + (e ? top(e) : '0') + ';';
           if (!v) {
             err('赋值目标「' + name + '」在这里不可见，先用「声明变量」积木建它。', block);
           } else if (v.kind === 'array') {
             err('「' + name + '」是数组，要写「把 a 的第 i 项设为 …」。', block);
           } else if (e) {
-            if (e.type === 'string') {
-              err('不能把文本直接赋给 ' + v.type + ' 变量「' + name + '」（C 的字符串要配字符数组）。', block);
+            if (isStr(e.type) && !isStr(v.type)) {
+              err('不能把整块文本赋给 ' + tName(v.type) + ' 变量「' + name + '」。'
+                + (v.type === 'char' ? '单个字符请用「字符」积木。' : ''), block);
+            } else if (v.type === 'cstr') {
+              /* C 的文本变量是一块数组，赋值只能是「整块拷进去」：s = "x" 在 C 里编不过 */
+              if (!isStr(e.type)) {
+                err('「' + name + '」是文本（char 数组），只能整块写入文本，现在右边是 ' + tName(e.type) + '。', block);
+              } else {
+                if (e.type === 'string' && e.bytes > CSTR_MAX) {
+                  err('「' + name + '」只有 ' + CSTR_CAP + ' 字节，这段文本要占 ' + e.bytes
+                    + ' 字节（再加 \\0），strcpy 会写越界。', block);
+                }
+                used.cstring = true;
+                stmt = 'strcpy(' + name + ', ' + top(e) + ');';
+              }
+            } else if (v.type === 'stdstr') {
+              if (e.type === 'char') {
+                info('把单个字符赋给文本变量「' + name + '」，得到的是一段只有 1 个字符的文本。', block);
+              } else if (!isStr(e.type)) {
+                err('不能把 ' + tName(e.type) + ' 赋给文本变量「' + name + '」。', block);
+              }
             } else if (v.type === 'int' && e.type === 'double') {
               warn('右边是小数，左边是 int：赋值会截断小数部分（3.9 存进去变 3）。', block);
             } else if (v.type === 'char' && e.type !== 'char') {
@@ -611,7 +800,7 @@
               /* 隐式提升 */
             }
           }
-          line(ctx, name + ' = ' + (e ? top(e) : '0') + ';', block);
+          line(ctx, stmt, block);
           return;
         }
 
@@ -625,7 +814,7 @@
           const idx = I(block.getInputTargetBlock('IDX'), ctx, name);
           const e = sub(block.getInputTargetBlock('VALUE'), ctx, block);
           if (v && e) {
-            if (e.type === 'string') err('数组「' + name + '」是 ' + v.type + ' 类型，存不了文本。', block);
+            if (isStr(e.type)) err('数组「' + name + '」是 ' + tName(v.type) + ' 类型，存不了整块文本。', block);
             else if (v.type === 'int' && e.type === 'double') warn('小数写进 int 数组会截断。', block);
           }
           line(ctx, name + '[' + idx + '] = ' + (e ? top(e) : '0') + ';', block);
@@ -646,7 +835,7 @@
             /* 文本积木直接当格式串：省掉 %s，生成的代码更好读；% 已经转义成 %% */
             const body = e.code.slice(1, -1);
             stmt = 'printf("' + body + (nl ? '\\n' : '') + '");';
-          } else if (e.type === 'string') {
+          } else if (isStr(e.type)) {
             stmt = 'printf("' + (nl ? '%s\\n' : '%s') + '", ' + top(e) + ');';
           } else {
             if (e.type === 'bool') used.stdbool = true;
@@ -688,17 +877,28 @@
             const want = SPEC_GROUP[sp.conv];
             const got = a.e.type;
             if (got === 'bool') used.stdbool = true;
-            if (want === 'any') continue;
+            if (want === 'any') {
+              /* %p 之类也要的是指针：std::string 对象本身不能进变参，给个 .c_str() 至少是合法指针 */
+              if (got === 'stdstr') { a.cstr = true; info('这里补了 .c_str()：std::string 不能直接交给 printf，只有它的内部字符指针可以。', block); }
+              continue;
+            }
             if (want === 'string') {
-              if (got !== 'string') err('%s 要的是字符串，第 ' + (i + 1) + ' 个参数是 ' + got + '。', a.block);
+              if (!isStr(got)) err('%s 要的是字符串，第 ' + (i + 1) + ' 个参数是 ' + tName(got) + '。', a.block);
+              else if (got === 'stdstr') {
+                /* 这就是「printf("%s", s) 编译不过」的根因：可变参数拿不到类型信息，
+                   传 std::string 过去是把对象整个塞进栈里，clang 直接拒绝。
+                   .c_str() 交出的是真正的 const char*，printf 认得。 */
+                a.cstr = true;
+              }
             } else if (want === 'double') {
-              if (got !== 'double') err('%' + sp.conv + ' 要 double，第 ' + (i + 1) + ' 个参数是 ' + got
+              if (got !== 'double') err('%' + sp.conv + ' 要 double，第 ' + (i + 1) + ' 个参数是 ' + tName(got)
                 + '。整数请改用 %d，或先用「转成小数」积木。', a.block);
             } else if (want === 'char') {
               if (got === 'double') err('%c 要字符/整数，第 ' + (i + 1) + ' 个参数是小数。', a.block);
+              else if (isStr(got)) err('%c 打印的是单个字符，第 ' + (i + 1) + ' 个参数是一整块文本；整块文本请用 %s。', a.block);
             } else if (want === 'int') {
               if (got === 'double') err('%' + sp.conv + ' 要整数，第 ' + (i + 1) + ' 个参数是 double（会打印出错乱的值）。', a.block);
-              if (got === 'string') err('%' + sp.conv + ' 要整数，第 ' + (i + 1) + ' 个参数是文本。', a.block);
+              if (isStr(got)) err('%' + sp.conv + ' 要整数，第 ' + (i + 1) + ' 个参数是文本。', a.block);
             }
             if (sp.mod.indexOf('l') >= 0 && want === 'int') {
               info('格式里带了 l 长度修饰符，对应 long；本版积木的类型是 int，可以去掉 l。', block);
@@ -706,7 +906,8 @@
           }
           const lit = '"' + escapeC(fmt, true) + '"';
           used.cstdio = true;      /* printf/scanf 积木在 C++ 模式下也照原样出 printf */
-          line(ctx, 'printf(' + lit + (filled.length ? ', ' + filled.map((a) => top(a.e)).join(', ') : '') + ');', block);
+          const argText = (a) => (a.cstr ? memberExpr(a.e, '.c_str()') : top(a.e));
+          line(ctx, 'printf(' + lit + (filled.length ? ', ' + filled.map(argText).join(', ') : '') + ');', block);
           return;
         }
 
@@ -732,13 +933,37 @@
             err('格式串里 ' + specs.length + ' 个转换说明符对上 ' + good.length + ' 个写入目标；'
               + 'scanf 会按格式串逐个往这些地址里写，数量对不上就是写越界或读到垃圾。', block);
           }
+          const edits = {};      /* 需要改写格式说明符的位置：%s → %255s */
           for (let i = 0; i < Math.min(specs.length, good.length); i++) {
             const sp = specs[i];
             const t = good[i];
             const want = SPEC_GROUP[sp.conv];
             if (want === 'string') {
-              err('%s 要的是字符数组名（一整块缓冲区），本版积木还不能把数组整体交给 scanf；先用 %c 一格一格读。', block);
+              if (t.type === 'cstr') {
+                /* C 的文本变量就是那块缓冲区：数组名本身就是地址，宽度上限替学生补上 */
+                const w = widthSpec(sp, t.cap || CSTR_MAX);
+                if (w.tooBig) {
+                  err('%s 里的宽度 ' + sp.width + ' 比 ' + CSTR_CAP + ' 字节的缓冲区还大，'
+                    + '最多只能写 %' + CSTR_MAX + 's。', block);
+                } else if (!sp.width) {
+                  info('%s 已自动写成 ' + w.text + '：不给宽度上限的话，输入只要比缓冲区长就会写越界。', block);
+                }
+                edits[i] = w.text;
+              } else if (t.type === 'stdstr') {
+                const nm = t.block ? String(t.block.getFieldValue('VAR') || '') : '';
+                err('%s 不能往文本变量' + (nm ? '「' + nm + '」' : '') + '里写：scanf 要的是 char*，'
+                  + '而 std::string 这一刻还没分配内存，写进去就是往空指针里倒字符。'
+                  + '读文本请改用「读入到变量」积木' + (nm ? '（它会出 std::cin >> ' + nm + ';）' : '') + '。', block);
+              } else {
+                err('%s 要的是字符数组名（一整块缓冲区），第 ' + (i + 1) + ' 个槽放的是 ' + tName(t.type)
+                  + '；先用「声明变量」建一个类型为「文本」的变量，再把它放进这个槽。', block);
+              }
               continue;
+            }
+            if (isStr(t.type)) {
+              err('第 ' + (i + 1) + ' 个目标是文本，不能用 ' + sp.text + ' 读入'
+                + (t.type === 'cstr' ? '；文本请用 %s（会自动带上缓冲区上限），或改用「读入到变量」积木。'
+                                     : '；请改用「读入到变量」积木。'), block);
             }
             if (want === 'double' && sp.mod.indexOf('l') < 0) {
               err('scanf 读小数必须写 %lf：'
@@ -760,7 +985,7 @@
               }
             }
           }
-          const lit = '"' + escapeC(fmt, true) + '"';
+          const lit = '"' + escapeC(Object.keys(edits).length ? patchFormat(fmt, specs, edits) : fmt, true) + '"';
           used.cstdio = true;
           line(ctx, 'scanf(' + lit + (good.length ? ', ' + good.map((a) => a.code).join(', ') : '') + ');', block);
           return;
@@ -782,6 +1007,16 @@
             /* C++：cin 自己会跳过空白，不需要 " %c" 那种前导空格，也没有 %lf 的坑 */
             used.iostream = true;
             line(ctx, 'std::cin >> ' + name + ';', block);
+            if (v.type === 'stdstr') {
+              info('cin >> 读文本是「读到一个词」：遇到空格、Tab 或换行就停，一行里的后半截留给下一次读入。', block);
+            }
+            return;
+          }
+          if (v.type === 'cstr') {
+            /* 数组名不加 &（加了变成 &s，类型是 char (*)[256]，%s 不认），宽度必须给 */
+            line(ctx, 'scanf("%' + CSTR_MAX + 's", ' + name + ');', block);
+            info('%255s 的那个 255 是上限：输入比这更长会被截断，换来的是不会写穿 '
+              + CSTR_CAP + ' 字节的缓冲区。另外 scanf 读文本遇到空格就停。', block);
             return;
           }
           const spec = SF[v.type];
@@ -815,7 +1050,7 @@
 
         case 'if': {
           const cond = sub(block.getInputTargetBlock('COND'), ctx, block);
-          if (cond && cond.type === 'string') err('「如果」的条件不能是文本，请放比较积木。', block);
+          if (cond && isStr(cond.type)) err('「如果」的条件不能是文本，请放比较积木。', block);
           if (cond && cond.type === 'double') {
             info('条件是 double：非 0 即为真，但小数判真通常该写成比较（例如 x > 0.5）。', block);
           }
@@ -851,7 +1086,7 @@
           if (step) {
             const sv = parseFloat(step.code);
             if (!isNaN(sv)) down = sv < 0;
-            else if (step.type === 'string') err('循环步长不能是文本。', block);
+            else if (isStr(step.type)) err('循环步长不能是文本。', block);
           }
           for (const [e, w] of [[from, '起点'], [to, '终点'], [step, '步长']]) {
             if (e && e.type === 'double') info('循环变量的' + w + '是小数，已按 (int) 截断（C 的 for 计数通常是整数）。', block);
@@ -927,7 +1162,7 @@
           if (ctx.isMain) {
             if (!b) { line(ctx, 'return 0;', block); return; }
             const e = E(b, ctx);
-            if (e.type !== 'int') warn('主程序返回的应该是整数退出码（0 表示成功），现在是 ' + e.type + '。', block);
+            if (e.type !== 'int') warn('主程序返回的应该是整数退出码（0 表示成功），现在是 ' + tName(e.type) + '。', block);
             line(ctx, 'return ' + top(e) + ';', block);
             return;
           }
@@ -942,7 +1177,9 @@
             line(ctx, 'return;', block);
             return;
           }
-          if (e.type === 'string') err('函数 ' + ctx.func.name + ' 返回 ' + ret + '，不能返回文本。', block);
+          if (isStr(e.type) && !isStr(ret)) err('函数 ' + ctx.func.name + ' 返回 ' + tName(ret) + '，不能返回文本。', block);
+          else if (isStr(ret) && !isStr(e.type)) err('函数 ' + ctx.func.name + ' 返回文本，「返回」积木里得放一段文本，现在是 '
+            + tName(e.type) + '。', block);
           else if (ret === 'int' && e.type === 'double') warn('返回小数但函数声明成 int，小数部分会被截断。', block);
           else if (ret === 'double' && e.type === 'int') { /* 隐式提升 */ }
           else if (ret === 'char' && e.type !== 'char') warn('返回 ' + e.type + ' 给 char 函数只保留低 8 位。', block);
@@ -991,8 +1228,9 @@
     /* ================================================================== */
     /* C 用 (void) 表示「没有参数」，C++ 直接空括号（(void) 也合法，但没人这么写） */
     const paramsOf = (d) => d.params.length
-      ? d.params.map((p) => p.type + ' ' + p.name).join(', ')
+      ? d.params.map(paramDecl).join(', ')
       : (cpp ? '' : 'void');
+    const retOf = (d) => (d.ret === 'void' ? 'void' : spellOf(d.ret));
 
     const funcBodies = [];
     for (const d of funcOrder) {
@@ -1001,9 +1239,11 @@
       pushScope(ctx);
       for (const p of d.params) {
         if (p.type === 'bool') used.stdbool = true;
+        if (p.type === 'stdstr') used.string = true;
         declare(ctx, p.name, p.type, 'var', d.block);
       }
-      ctx.lines.push((d.ret === 'void' ? 'void' : d.ret) + ' ' + d.name + '(' + paramsOf(d) + ') {');
+      if (d.ret === 'stdstr') used.string = true;
+      ctx.lines.push(retOf(d) + ' ' + d.name + '(' + paramsOf(d) + ') {');
       ctx.ind++;
       const head = d.block.getInputTargetBlock('BODY');
       if (!head) info('函数 ' + d.name + ' 的函数体是空的。', d.block);
@@ -1014,7 +1254,7 @@
       const last = [...ctx.lines].reverse()
         .find((l) => l.trim() && !/^[{}][^A-Za-z]*$/.test(l.trim()) && !/^\s*(\/\*|\*|\/\/)/.test(l.trim()));
       if (d.ret !== 'void' && !/^\s*return\b/.test(last || '')) {
-        warn('函数 ' + d.name + ' 声明返回 ' + d.ret + '，但最后一条语句不是「返回」；'
+        warn('函数 ' + d.name + ' 声明返回 ' + tName(d.ret) + '，但最后一条语句不是「返回」；'
           + '走到函数末尾还不 return，调用处拿到的值是未定义的。', d.block);
       }
       ctx.lines.push('}');
@@ -1053,19 +1293,22 @@
     out.push(' */');
     out.push('');
     if (cpp) {
-      /* C++ 只带真用到的头：cin/cout 走 <iostream>，printf/scanf 积木仍走 <cstdio> */
+      /* C++ 只带真用到的头：cin/cout 走 <iostream>，printf/scanf 积木仍走 <cstdio>，
+         std::string 必须有 <string>（别指望 <iostream> 顺手带进来） */
       if (used.iostream) out.push('#include <iostream>');
+      if (used.string) out.push('#include <string>       /* 积木里用了「文本」变量 */');
       if (used.cstdio) out.push('#include <cstdio>    /* 积木里用了 printf/scanf */');
     } else {
       out.push('#include <stdio.h>');
       if (used.stdbool) out.push('#include <stdbool.h>   /* 积木里用到 true / false / bool */');
+      if (used.cstring) out.push('#include <string.h>    /* 文本变量之间赋值要用 strcpy */');
     }
     out.push('');
 
     if (funcOrder.length) {
       out.push('/* ---------- 函数原型：先声明，谁先谁后都能互相调用（递归也靠它） ---------- */');
       for (const d of funcOrder) {
-        out.push((d.ret === 'void' ? 'void' : d.ret) + ' ' + d.name + '(' + paramsOf(d) + ');');
+        out.push(retOf(d) + ' ' + d.name + '(' + paramsOf(d) + ');');
       }
       out.push('');
       out.push('/* ---------- 函数定义 ---------- */');

@@ -298,7 +298,9 @@
     <ul>
       <li>工具栏「语言」默认 <b>C++</b>：输出走 <code>std::cout</code>、读入走 <code>std::cin</code>，按需带 <code>#include &lt;iostream&gt;</code>，<code>bool</code> 是内建类型不需要头文件。切回 <b>C</b> 就是 <code>printf / scanf</code> + <code>#include &lt;stdio.h&gt;</code>，用到 <code>true/false</code> 时自动补 <code>&lt;stdbool.h&gt;</code>。</li>
       <li>「printf / scanf」积木在两种语言下都照 C 那套语义生成（C++ 里额外带 <code>#include &lt;cstdio&gt;</code>），格式说明符数量和类型都会校验；「读入」积木选 C++ 时不再关心 <code>%lf</code> 之类的坑。</li>
-      <li>不管选哪种语言，生成的都是 C 风格代码：原生数组、C 风格强制转换、<code>(类型)</code> 括号照旧加，不会替你变成 <code>std::string</code> / <code>std::vector</code> / <code>static_cast</code>。</li>
+      <li>除「文本」变量外，两种语言生成的都是 C 风格代码：原生数组、C 风格强制转换、<code>(类型)</code> 括号照旧加，不会替你变成 <code>std::vector</code> 或 <code>static_cast</code>。</li>
+      <li>类型选<b>文本</b>时才是各自语言的写法：C++ 出 <code>std::string s;</code>（自动带 <code>#include &lt;string&gt;</code>，可以 <code>+</code> 拼接、<code>==</code> 比内容、<code>cin &gt;&gt; s</code>），C 出 <code>char s[256];</code>（赋值自动变 <code>strcpy</code>，读入自动变 <code>%255s</code>）。</li>
+      <li><code>printf</code> 的 <code>%s</code> 遇到 <code>std::string</code> 会自动补 <code>.c_str()</code> —— 对象本身不能进可变参数，那样编译不过；<code>scanf</code> 的 <code>%s</code> 反过来拒绝 <code>std::string</code>（它要 <code>char*</code>），读文本请改用「读入到变量」积木。C 的文本比较、算术一律报错：那是比地址，不是比内容，要比内容得用 <code>strcmp</code>，本版积木还没提供。</li>
       <li>「输出」积木自动推导格式符（int→<code>%d</code>、double→<code>%g</code>、char→<code>%c</code>）；要手写格式串就用「printf / scanf」积木，说明符数量和类型都会校验。</li>
       <li>「读入」只接受<b>变量</b>或<b>数组的第 i 项</b>（要的是能往里写东西的地方，算出来的数值不行），小数的原生格式必须写 <code>%lf</code>。</li>
       <li>声明就地生成，作用域与手写 C 完全一致：循环里声明的变量出了循环就不存在，越界使用时诊断会指名道姓。</li>

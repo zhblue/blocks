@@ -17,6 +17,9 @@
     { id: 'double', label: '小数 double' },
     { id: 'char', label: '字符 char' },
     { id: 'bool', label: '布尔 bool' },
+    /* 「文本」是唯一按语言变身的类型：C++ 出 std::string，C 出 char[256]。
+       下拉里只写一个中性名字，具体变成什么由生成器按当前语言决定。 */
+    { id: 'string', label: '文本 string' },
   ];
 
   const COL = {
@@ -34,7 +37,7 @@
   const EMPTY_ARR = '（先拖一个「声明数组」积木）';
   const EMPTY_FN_VOID = '（还没有 void 函数：先拖「函数」积木）';
   const EMPTY_FN_VAL = '（还没有带返回值的函数：先拖「函数」积木）';
-  const EMPTY_READ = '（先声明一个 int/double/char 变量）';
+  const EMPTY_READ = '（先声明一个 int/double/char/文本 变量）';
   /* 工作区里有声明，但按 C 的作用域规则对这块积木不可见时，说清楚为什么 */
   const EMPTY_FLOATING = '（这块还没接进语句里：把它拖进积木的凹槽，才能看到声明）';
   const EMPTY_NOT_IN_PROGRAM = '（没接到「主程序」/「函数」里：声明放在外面时，要先拖进程序体、且放在这块之前）';
@@ -232,14 +235,16 @@
   }
 
   function dynField(listFn, spec, validator) {
+    const kind = typeof spec === 'string' ? spec : (spec && spec.kind) || 'var';
     const field = new Blockly.FieldDropdown(function () {
       const items = listFn(this.getSourceBlock());
       if (!items.length) return [[emptyHint(this.getSourceBlock(), spec), '__none__']];
       return items.map((it) => [it.label, it.value]);
     }, validator);
     /* 标记给 syncDynamicFields 用：Blockly 会缓存下拉候选，积木刚从工具箱里拖出来
-       时算的那一份是空的，不强制刷新就会一直显示「没有可选」。 */
-    field.__dyn = { locked: false };
+       时算的那一份是空的，不强制刷新就会一直显示「没有可选」。
+       kind 决定补默认值时要不要跟同组别的槽位让名字（只有变量要让）。 */
+    field.__dyn = { locked: false, kind: kind };
     return field;
   }
 
@@ -258,35 +263,92 @@
   /**
    * 工作区一变就刷新所有动态下拉：
    *   1. 强制重算候选（Blockly 会缓存，积木刚从工具箱拖出来时算的那份是空的）；
-   *   2. 当前值还是占位符 __none__、而候选里已经有真名字时，自动选中第一个。
+   *   2. 当前值还是占位符 __none__、而候选里已经有真名字时，自动补一个。
+   * 补哪一个有讲究。同一个父积木的几个槽位 —— scanf 的两个目标槽、加减法的 A/B、
+   * 排在同一个程序体里的两条「读入」 —— 要是都补第一个名字，学生拖两块「变量」进去
+   * 拿到的是 &a、&a：程序照编照跑，第二个数永远把第一个盖掉，而「读两个数」正是最常
+   * 写的形式。所以按槽位顺序补，同组里已经被占走的名字往后让一个。
+   * 只剩一个候选（或候选全被占）时照旧重复 —— 两次都用同一个变量是合法需求，
+   * 手动改一下下拉，比让程序悄悄写错便宜。数组和函数不参与互斥：读同一个数组的
+   * a[i]、a[j]，连着调用同一个函数，都是常态。
    * 已经选了真名字的积木不动：哪怕它现在越界了，也留给生成器报错，
    * 静悄悄地把 x 换成 y 反而更难查。
    * 返回改动的字段数。调用方要防重入（setValue 本身也会发变更事件）。
    */
   function syncDynamicFields(ws) {
     if (!ws || typeof ws.getAllBlocks !== 'function') return 0;
-    let changed = 0;
-    for (const b of ws.getAllBlocks(false)) {
+    const all = ws.getAllBlocks(false);
+
+    /* 槽位顺序表 + 归属表：getAllBlocks 给的是积木的创建顺序，跟摆在哪个槽无关，照它填
+       会出现「第 2 个槽先补、抢到 a」这种反直觉结果。按父积木的输入顺序 + 语句链顺序
+       重编号，同组内比这个号就是槽位顺序。
+       归属不能直接用 parentOf：语句链里第二块往上的 previousConnection 连的是它前一块
+       积木，不是装着这条链的程序体，那样同一条链上的两块「读入」会各分一组、互不避让。 */
+    const order = new Map();
+    const host = new Map();
+    let seq = 0;
+    for (const b of all) {
+      for (const inp of (b.inputList || [])) {
+        const t = inp.connection && inp.connection.targetBlock();
+        if (!t) continue;
+        for (const c of chainOf(t)) {
+          if (order.has(c.id)) continue;
+          order.set(c.id, seq++);
+          host.set(c.id, b);
+        }
+      }
+    }
+
+    /* 一组 = 挂在同一个父积木（同一个程序体 / 同一块积木的输入槽）上的那些积木；
+       还没接进任何槽的浮空积木自己一组，等连上后变更事件会再跑一遍 */
+    const groupId = (b) => { const h = host.get(b.id); return h ? h.id : 'self:' + b.id; };
+    const taken = new Map();      /* groupId -> Set(已被占用的变量名) */
+    const pending = [];           /* 还停在占位符上的字段 */
+
+    for (const b of all) {
       if (!b.inputList) continue;
+      const gid = groupId(b);
+      if (!taken.has(gid)) taken.set(gid, new Set());
       for (const inp of b.inputList) {
         for (const f of (inp.fieldRow || [])) {
           if (!f.__dyn || f.__dyn.locked || !f.getOptions) continue;
-          let opts;
-          try { opts = f.getOptions(false); } catch (e) { continue; }   /* false = 重新生成 */
-          if (!opts || !opts.length) continue;
           const cur = f.getValue();
-          if (cur !== '__none__' && cur !== null && cur !== undefined && cur !== '') continue;
-          const first = opts[0];
-          const val = optionValue(first);
-          if (val === undefined || val === '__none__') continue;   /* 还是没得选 */
-          f.__dyn.locked = true;
-          try { f.setValue(val); changed++; } finally { f.__dyn.locked = false; }
-          /* 让显示文本跟候选对齐（Blockly 找不到 selectedOption 时会把文本清空） */
-          if (!f.getText || !f.getText()) {
-            if (f.setValueIndex) { try { f.setValueIndex(0); } catch (e) { /* 忽略 */ } }
-            else if (f.setText) f.setText(optionText(first));
+          const unset = cur === '__none__' || cur === null || cur === undefined || cur === '';
+          if (!unset) {
+            if (f.__dyn.kind === 'var') taken.get(gid).add(cur);   /* 这个名被别的槽占了 */
+            continue;
           }
+          pending.push({ block: b, field: f, gid: gid, at: order.has(b.id) ? order.get(b.id) : (seq++) });
         }
+      }
+    }
+
+    pending.sort((x, y) => x.at - y.at);
+    let changed = 0;
+    for (const item of pending) {
+      const f = item.field;
+      let opts;
+      try { opts = f.getOptions(false); } catch (e) { continue; }   /* false = 重新生成 */
+      if (!opts || !opts.length) continue;
+      const set = taken.get(item.gid);
+      let pick = null;
+      for (const o of opts) {
+        const val = optionValue(o);
+        if (val === undefined || val === '__none__') continue;          /* 还是没得选 */
+        if (f.__dyn.kind === 'var' && set && set.has(val)) continue;    /* 同组别的槽已用 */
+        pick = { val: val, opt: o };
+        break;
+      }
+      if (!pick) pick = { val: optionValue(opts[0]), opt: opts[0] };    /* 全被占：退回重复 */
+      if (pick.val === undefined || pick.val === '__none__') continue;
+      f.__dyn.locked = true;
+      try { f.setValue(pick.val); changed++; } finally { f.__dyn.locked = false; }
+      if (f.__dyn.kind === 'var' && set) set.add(pick.val);
+      /* 让显示文本跟候选对齐（Blockly 找不到 selectedOption 时会把文本清空） */
+      if (!f.getText || !f.getText()) {
+        const idx = opts.findIndex((o) => optionValue(o) === pick.val);
+        if (f.setValueIndex && idx >= 0) { try { f.setValueIndex(idx); } catch (e) { /* 忽略 */ } }
+        else if (f.setText) f.setText(optionText(pick.opt));
       }
     }
     return changed;
@@ -296,8 +358,15 @@
     return visibleNames(block, want).map((v) => ({ label: v.name, value: v.name }));
   }
 
-  function scalarTypeField() {
-    return new Blockly.FieldDropdown(SCALAR_TYPES.map((t) => [t.label, t.id]));
+  /**
+   * 类型下拉。noText = true 时不给「文本」：
+   * 数组的元素类型里没有「文本」这一档 —— C 会变成二维字符数组（a[i] 才是一整块文本），
+   * C++ 虽然是 std::string a[10]，但「数组的第 i 项」这套积木是按数值设计的，
+   * 两头都解释不清，所以只在单变量那一档提供文本。
+   */
+  function scalarTypeField(noText) {
+    const list = SCALAR_TYPES.filter((t) => !(noText && t.id === 'string'));
+    return new Blockly.FieldDropdown(list.map((t) => [t.label, t.id]));
   }
 
   function nameField(initial) {
@@ -455,7 +524,9 @@
       this.appendValueInput('INIT').setCheck('Value').appendField('初始值（可留空）');
       this.setPreviousStatement(true, STMT);
       this.setNextStatement(true, STMT);
-      this.setTooltip('对应 int x = 5; / double t; / char c; / bool ok;。\n声明之后的语句才能用它；放在循环里就等于每轮重新初始化。');
+      this.setTooltip('对应 int x = 5; / double t; / char c; / bool ok;。\n'
+        + '类型选「文本」时：C++ 出 std::string s;，C 出 char s[256];（最多存 255 个字符，一个汉字占 3 字节）。\n'
+        + '声明之后的语句才能用它；放在循环里就等于每轮重新初始化。');
     },
   };
 
@@ -481,7 +552,8 @@
         .appendField('变量')
         .appendField(dynField((b) => varList(b, { kind: 'var' }), 'var'), 'VAR');
       this.setOutput(true, ['LValue', 'Value']);
-      this.setTooltip('读取变量的值，可以塞进任何需要数值或文本的地方；\n放进 scanf 的槽位时会自动取地址（&x）。');
+      this.setTooltip('读取变量的值，可以塞进任何需要数值或文本的地方；\n'
+        + '放进 scanf 的槽位时会自动取地址（&x）；文本变量在 C 里就是一块字符数组，数组名本身是地址，不再加 &。');
     },
   };
 
@@ -491,14 +563,15 @@
       this.setColour(COL.vari);
       this.appendDummyInput()
         .appendField('声明')
-        .appendField(scalarTypeField(), 'TYPE')
+        .appendField(scalarTypeField(true), 'TYPE')
         .appendField('数组')
         .appendField(nameField('a'), 'NAME')
         .appendField('长度')
         .appendField(new Blockly.FieldNumber(10, 1, 65536, 1), 'LEN');
       this.setPreviousStatement(true, STMT);
       this.setNextStatement(true, STMT);
-      this.setTooltip('对应 int a[10];。长度是编译期常量；下标从 0 开始，合法范围 0 ~ 长度-1。');
+      this.setTooltip('对应 int a[10];。长度是编译期常量；下标从 0 开始，合法范围 0 ~ 长度-1。\n'
+        + '数组的元素类型没有「文本」这一档：要一整块文本，请用「声明变量」选文本类型（C 里它就是一块字符数组）。');
     },
   };
 
@@ -555,12 +628,14 @@
       this.appendDummyInput()
         .appendField('读入到变量')
         .appendField(dynField(
-          (b) => varList(b, { kind: 'var', types: ['int', 'double', 'char'] }),
+          (b) => varList(b, { kind: 'var', types: ['int', 'double', 'char', 'string'] }),
           { kind: 'var', none: EMPTY_READ },
         ), 'VAR');
       this.setPreviousStatement(true, STMT);
       this.setNextStatement(true, STMT);
-      this.setTooltip('对应 scanf(" %d", &x)，格式符按目标变量类型自动选：int 用 %d、double 用 %lf、char 用 " %c"（前面留空格跳过换行和空白）。');
+      this.setTooltip('对应 scanf(" %d", &x)，格式符按目标变量类型自动选：int 用 %d、double 用 %lf、char 用 " %c"（前面留空格跳过换行和空白）。\n'
+        + '目标是文本变量时：C++ 出 std::cin >> s;，C 出 scanf("%255s", s);（宽度自动卡在缓冲区大小以内）。\n'
+        + '两种写法都只读到一个词：遇到空格、Tab 或换行就停。');
     },
   };
 
@@ -642,13 +717,17 @@
   mutableArgBlock({
     type: 'c_printf', cKind: 'printf', headLabel: 'printf 格式', noun: '参数',
     argLabel: '参数', check: ['Value', 'Text'], fmtDefault: '%d\\n', start: 1,
-    tooltip: '对应 printf("格式串", 参数…);。格式串里照 C 的写法填，例如 %d、%.2f、%g、%c、%s、\\n。\n生成器会数一遍格式说明符和参数个数是否对得上，这是 C 初学者最常踩的坑。',
+    tooltip: '对应 printf("格式串", 参数…);。格式串里照 C 的写法填，例如 %d、%.2f、%g、%c、%s、\\n。\n'
+      + '生成器会数一遍格式说明符和参数个数是否对得上，这是 C 初学者最常踩的坑。\n'
+      + '%s 配 C++ 的文本变量时会自动补 .c_str()：std::string 对象本身不能进可变参数。',
   });
 
   mutableArgBlock({
     type: 'c_scanf', cKind: 'scanf', headLabel: 'scanf 格式', noun: '目标',
     argLabel: '放入', check: 'LValue', fmtDefault: '%d', start: 1,
-    tooltip: '对应 scanf("格式串", &x, …);。槽位只吃变量或数组元素（表达式进不来），& 由生成器补。\n读 char 时记得在 %c 前面留个空格，否则会先吃掉上一行的换行符。',
+    tooltip: '对应 scanf("格式串", &x, …);。槽位只吃变量或数组元素（表达式进不来），& 由生成器补。\n'
+      + '读 char 时记得在 %c 前面留个空格，否则会先吃掉上一行的换行符。\n'
+      + '%s 配 C 的文本变量会自动加上限（%255s），并且不写 &（数组名就是地址）；C++ 的 std::string 不能这么读，请改用「读入到变量」。',
   });
 
   Blockly.Blocks['c_text'] = {
@@ -781,6 +860,7 @@
         .appendField('返回')
         .appendField(new Blockly.FieldDropdown([
           ['无返回值 void', 'void'], ['整数 int', 'int'], ['小数 double', 'double'], ['字符 char', 'char'],
+          ['文本 string', 'string'],
         ]), 'RET')
         .appendField('参数')
         .appendField(new Blockly.FieldDropdown(
@@ -804,7 +884,9 @@
       this.loadExtraState = function (state) {
         if (state && typeof state.np === 'string') this.updateParams_(state.np);
       };
-      this.setTooltip('定义一个 C 函数，生成在 main 之前，并自动补一行函数原型，所以谁先谁后都能互相调用（递归也可以）。');
+      this.setTooltip('定义一个 C 函数，生成在 main 之前，并自动补一行函数原型，所以谁先谁后都能互相调用（递归也可以）。\n'
+        + '参数或返回值选「文本」只在 C++ 里成立（std::string 是按值传递的真类型）；'
+        + 'C 里文本是一块 char 数组，函数收不到它的长度，生成器会报错并解释原因。');
     },
   };
 
