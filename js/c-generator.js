@@ -1361,9 +1361,11 @@
       case 'bool_lit': return f('V');
       case 'arith': return f('OP');
       case 'compare': return f('OP');
-      case 'logic': return f('OP') === '&&' ? '且' : '或';
-      case 'not': return '非';
-      case 'neg': return '负';
+      /* 诊断列表里的标签跟积木脸上写的保持一致：积木上是 && / || / ! / -，
+         这里就别再写「且 / 或 / 非 / 负」，否则学生要在两套说法之间再翻译一次。 */
+      case 'logic': return f('OP');
+      case 'not': return '!';
+      case 'neg': return '-';
       case 'cast': return '转成' + f('TO');
       case 'if': return '如果';
       case 'repeat': return '重复执行';

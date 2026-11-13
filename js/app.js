@@ -64,7 +64,7 @@ function fillStd(keep) {
 /** 代码面板的标题跟着语言改：main.cc / main.c，别写着 C 却编 C++ */
 function refreshSourceCaption() {
   $('srccap').textContent = '生成的 ' + langOpt().label + ' 代码 ' + langOpt().file
-    + '（可直接微调后再编译；改过积木会被覆盖，用「按积木重新生成」找回）';
+    + '（可直接微调后再编译；手改之后积木的改动不再覆盖这里，点「按积木重新生成」找回）';
 }
 
 /*
@@ -225,6 +225,9 @@ function loadProgram(build, opts) {
   realize(roots);
   if (workspace.cleanUp) workspace.cleanUp();
   if (o.stdin !== undefined) $('stdin').value = o.stdin;
+  /* 整份程序都换掉了，旧的手改没有保留的意义。不清这个标记，下面的 regenerate()
+     会拒绝写面板 —— 用户看到的就是「换了程序，代码却没变」。 */
+  markGeneratedClean();
   saveWorkspace();
   regenerate();
 }
@@ -400,13 +403,29 @@ const srcEditor = ace.edit('editor', {
 let lastGenerated = '';      /* 上次由积木生成的代码，用来判断用户有没有手改 */
 let codeTouched = false;
 
-function markGeneratedClean() { codeTouched = false; }
+/*
+ * 「手改过」是个开关：用户在代码面板里敲过字之后，积木的改动就不再覆盖这里，
+ * 否则老师正在讲的那几行会被下一次拖积木冲掉。这个行为是有意的，但它原来完全
+ * 看不见 —— 代码不动了，用户只以为程序坏了，于是刷新网页（刷新会把这个开关清掉，
+ * 所以「刷新一下就好了」）。现在把它摆在标题栏上，并且给一键找回。
+ */
+function renderSourceState() {
+  const el = $('srcstate');
+  if (!el) return;
+  el.classList.toggle('touched', codeTouched);
+  el.textContent = codeTouched ? '已手改 · 点我按积木重新生成' : '跟随积木';
+  el.title = codeTouched
+    ? '你在代码面板里改过字。为了保住手改，积木的改动不会再覆盖这里。点一下按当前积木重新生成（手改会丢）。'
+    : '代码由积木实时生成：改积木，这里跟着改。在这里敲字就会切成「已手改」，不再自动覆盖。';
+}
+
+function markGeneratedClean() { codeTouched = false; renderSourceState(); }
 
 srcEditor.on('change', () => {
   const v = srcEditor.getValue();
   $('srclen').textContent = v.length + ' 字符 / ' + v.split('\n').length + ' 行';
-  if (v !== lastGenerated) codeTouched = true;
-  else codeTouched = false;
+  const touched = v !== lastGenerated;
+  if (touched !== codeTouched) { codeTouched = touched; renderSourceState(); }
 });
 
 /* ================================================================== */
@@ -556,6 +575,7 @@ function regenerate() {
     srcEditor.setValue(res.code, -1);
     srcEditor.clearSelection();
     codeTouched = false;
+    renderSourceState();
   }
   renderDiagnostics(res.diagnostics);
   $('blockcount').textContent = workspace.getAllBlocks(false).length + ' 块积木 / '
@@ -613,11 +633,70 @@ function focusBlock(id) {
   } catch (e) { b.select && b.select(); }
 }
 
-/* 积木一变就重新生成；撤销/重做、删除、连线都走这一个事件 */
-let regenTimer = null;
-workspace.addChangeListener(() => {
+/* 积木一变就重新生成；撤销/重做、删除、连线都走这一个事件。
+ *
+ * 这里一并解决老师反馈的「连着写几个程序之后，代码就不更新了，得刷新」：
+ * 1) 只认内容事件。点击、选中、滚视口、开气泡这类纯 UI 事件原来也会把 120ms 的
+ *    防抖重新计时 —— 手上一直在点、在滚，生成就一直被往后推。
+ * 2) 防抖带最长等待。拖积木时事件连着来，光靠防抖可能永远等不到那 120ms 的空档；
+ *    超过 MAXWAIT 就先生成一次，拖的过程中也能看见代码跟着走。
+ * 3) 生成过程兜异常。原来 regenerate() 抛一次，排在后面的 saveWorkspace() 就跟着
+ *    不执行：页面既不更新也不存档，而且一声不响，只能刷新。现在异常摆进诊断列表，
+ *    存档照做，刷新不会丢掉刚拖的积木。
+ */
+const REGEN_DEBOUNCE = 120, REGEN_MAXWAIT = 400;
+const REGEN_IGNORE = new Set([
+  'ui', 'click', 'selected', 'bubble_open', 'trashcan_open',
+  'viewport_change', 'theme_change', 'toolbox_item_select', 'drag',
+]);
+let regenTimer = null, regenFirstAt = 0;
+
+/** 生成器抛异常时的兜底：把错误摆出来，别让用户对着一份不动的代码猜 */
+function showGenError(e) {
+  for (const b of pinned) { try { b.setWarningText(null); } catch (x) {} }
+  pinned = [];
+  const box = $('diag');
+  box.textContent = '';
+  const row = document.createElement('div');
+  row.className = 'd error';
+  const tag = document.createElement('span');
+  tag.className = 'tag';
+  tag.textContent = '错误';
+  const txt2 = document.createElement('span');
+  txt2.className = 'txt';
+  const m = e && e.message ? e.message : String(e);
+  txt2.textContent = '按积木生成代码时出错：' + m + '。积木已照原样存档，刷新不会丢；'
+    + '把出问题的积木删掉或改一下再试。';
+  row.append(tag, txt2);
+  box.appendChild(row);
+  $('diaglen').textContent = '1 条';
+  say('生成代码时出错：' + m, 'err');
+}
+
+function runRegen() {
+  regenTimer = null;
+  regenFirstAt = 0;
+  try {
+    syncNameFields();
+    regenerate();
+  } catch (e) {
+    showGenError(e);
+  } finally {
+    saveWorkspace();
+  }
+}
+
+function scheduleRegen() {
+  const now = Date.now();
+  if (regenTimer === null) regenFirstAt = now;      /* 新一轮防抖的起点 */
   clearTimeout(regenTimer);
-  regenTimer = setTimeout(() => { syncNameFields(); regenerate(); saveWorkspace(); }, 120);
+  const wait = Math.min(REGEN_DEBOUNCE, Math.max(0, REGEN_MAXWAIT - (now - regenFirstAt)));
+  regenTimer = setTimeout(runRegen, wait);
+}
+
+workspace.addChangeListener((e) => {
+  if (e && REGEN_IGNORE.has(e.type)) return;
+  scheduleRegen();
 });
 
 /* ================================================================== */
@@ -927,6 +1006,13 @@ stopBtn.onclick = stopAll;
 $('reload').onclick = () => { clearOutput(); startCompileWorker(); };
 $('clearout').onclick = clearOutput;
 $('regen').onclick = () => { markGeneratedClean(); regenerate(); say('已按当前积木重新生成代码', 'ok'); };
+/* 标题栏上那颗状态胶囊：手改过就点它找回，没手改点一下也无害（就是重生成一次） */
+$('srcstate').onclick = () => {
+  const wasTouched = codeTouched;
+  markGeneratedClean();
+  regenerate();
+  say(wasTouched ? '已丢弃手改，按当前积木重新生成代码' : '已按当前积木重新生成代码', 'ok');
+};
 $('save').onclick = () => {
   saveWorkspace();
   clearTimeout(saveTimer);
@@ -957,7 +1043,14 @@ $('clear').onclick = () => {
   saveWorkspace();
 };
 
-['std', 'opt', 'timeout', 'annotate'].forEach((id) => $(id).addEventListener('change', saveWorkspace));
+['std', 'opt', 'timeout'].forEach((id) => $(id).addEventListener('change', saveWorkspace));
+/* 「代码里带中文注释」直接改生成出来的代码，勾上/去掉就得立刻重生成。
+   原来它只存档不重生成，用户看到的是「勾了没反应」，也算一种「代码不更新」。
+   std / opt / timeout 只影响编译参数，不动代码，所以仍然只存档。 */
+$('annotate').addEventListener('change', () => {
+  saveWorkspace();
+  if (!codeTouched) regenerate();
+});
 
 /*
  * 换语言：先把「标准」下拉框换成该语言的候选，再重生成一次代码。
@@ -976,6 +1069,21 @@ $('lang').addEventListener('change', () => {
 });
 
 stdinEl.addEventListener('input', saveWorkspace);
+
+/*
+ * 切出去再切回来，主动补一次生成。
+ * Blockly 13 的变更事件是靠 requestAnimationFrame 派发的（vendor/blockly 里
+ * fireInternal 写的是 rAF(() => setTimeout(fireNow, 0))），页面切到后台时 rAF 被
+ * 浏览器挂起，事件就压在队列里不发，代码面板停在切出去之前那一份。老师上课切出去
+ * 放个 PPT 再切回来是常态，所以这里在重新可见 / 重新拿到焦点时补一次。
+ * 手改过的面板不动 —— 那是用户自己的字，不能借「补一次」的名义覆盖掉。
+ */
+function catchUpRegen() {
+  if (document.hidden || codeTouched || busy) return;
+  runRegen();
+}
+document.addEventListener('visibilitychange', catchUpRegen);
+window.addEventListener('focus', catchUpRegen);
 
 /* 白天 / 夜晚：勾上就是白天。只换配色，不动积木、代码和编译参数。 */
 $('theme').addEventListener('change', () => {
@@ -1076,5 +1184,6 @@ function stateLooksSane(state) {
     EXAMPLES[$('examples').value]();
   }
   regenerate();
+  renderSourceState();
   startCompileWorker();
 })();

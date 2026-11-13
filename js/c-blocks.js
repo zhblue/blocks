@@ -767,11 +767,12 @@
       this.setColour(COL.math);
       this.appendValueInput('A').setCheck('Value');
       this.appendDummyInput().appendField(
-        new Blockly.FieldDropdown([['+', '+'], ['−', '-'], ['×', '*'], ['÷', '/'], ['取余', '%']]), 'OP');
+        new Blockly.FieldDropdown([['+', '+'], ['-', '-'], ['*', '*'], ['/', '/'], ['%', '%']]), 'OP');
       this.appendValueInput('B').setCheck('Value');
       this.setInputsInline(true);
       this.setOutput(true, 'Value');
-      this.setTooltip('对应 + - * / %。两个整数相除会截断（7 / 2 得 3）；想要 3.5 就用「运算 → 值类型转换」先把一边转成 double。');
+      this.setTooltip('对应 + - * / %，积木上写的就是代码里的那个符号。\n'
+        + '% 是取余（7 % 2 得 1）；两个整数相除会截断（7 / 2 得 3），想要 3.5 就用「运算 → 值类型转换」先把一边转成 double。');
     },
   };
 
@@ -779,9 +780,9 @@
     init: function () {
       this.cKind = 'neg';
       this.setColour(COL.math);
-      this.appendValueInput('A').setCheck('Value').appendField('负');
+      this.appendValueInput('A').setCheck('Value').appendField('-');
       this.setOutput(true, 'Value');
-      this.setTooltip('一元负号 -(表达式)。');
+      this.setTooltip('一元负号 -(表达式)：把正负翻过来，-5 就是负五。');
     },
   };
 
@@ -806,11 +807,13 @@
       this.setColour(COL.logic);
       this.appendValueInput('A').setCheck('Value');
       this.appendDummyInput().appendField(
-        new Blockly.FieldDropdown([['=', '=='], ['≠', '!='], ['<', '<'], ['>', '>'], ['≤', '<='], ['≥', '>=']]), 'OP');
+        new Blockly.FieldDropdown([['==', '=='], ['!=', '!='], ['<', '<'], ['>', '>'], ['<=', '<='], ['>=', '>=']]), 'OP');
       this.appendValueInput('B').setCheck('Value');
       this.setInputsInline(true);
       this.setOutput(true, 'Value');
-      this.setTooltip('比较运算 == != < > <= >=，结果是 1 或 0。小心：= 是赋值，== 才是相等。');
+      this.setTooltip('比较运算 == != < > <= >=，积木上写的就是代码里的那个符号，结果是 1 或 0。\n'
+        + '== 是「相等吗」，!= 是「不相等吗」；<= 是小于等于，>= 是大于等于。\n'
+        + '小心：单个 = 是赋值，== 才是相等。');
     },
   };
 
@@ -820,11 +823,12 @@
       this.setColour(COL.logic);
       this.appendValueInput('A').setCheck('Value');
       this.appendDummyInput().appendField(
-        new Blockly.FieldDropdown([['且', '&&'], ['或', '||']]), 'OP');
+        new Blockly.FieldDropdown([['&&', '&&'], ['||', '||']]), 'OP');
       this.appendValueInput('B').setCheck('Value');
       this.setInputsInline(true);
       this.setOutput(true, 'Value');
-      this.setTooltip('逻辑与 && / 逻辑或 ||，短路求值：左边已定胜负时右边不计算。');
+      this.setTooltip('&& 就是 Scratch 里的「且」，|| 就是「或」，积木上写的就是代码里的那个符号。\n'
+        + '短路求值：左边已定胜负时右边不计算。');
     },
   };
 
@@ -832,9 +836,10 @@
     init: function () {
       this.cKind = 'not';
       this.setColour(COL.logic);
-      this.appendValueInput('A').setCheck('Value').appendField('非');
+      this.appendValueInput('A').setCheck('Value').appendField('!');
       this.setOutput(true, 'Value');
-      this.setTooltip('逻辑非 !(表达式)：0 变 1，非 0 变 0。');
+      this.setTooltip('! 就是 Scratch 里的「非」，积木上写的就是代码里的那个符号。\n'
+        + '逻辑非 !(表达式)：0 变 1，非 0 变 0。');
     },
   };
 
@@ -843,9 +848,10 @@
       this.cKind = 'bool_lit';
       this.setColour(COL.logic);
       this.appendDummyInput().appendField(
-        new Blockly.FieldDropdown([['真', 'true'], ['假', 'false']]), 'V');
+        new Blockly.FieldDropdown([['true', 'true'], ['false', 'false']]), 'V');
       this.setOutput(true, 'Value');
-      this.setTooltip('true / false。工作区里用到它才会 #include <stdbool.h>。');
+      this.setTooltip('true 是真，false 是假，积木上写的就是代码里的那个词。\n'
+        + '工作区里用到它才会 #include <stdbool.h>。');
     },
   };
 
