@@ -110,6 +110,20 @@
   }
   .cap-right { display: flex; align-items: center; gap: 10px; }
 
+  /* 代码面板的「跟随积木 / 已手改」状态。手改之后积木的改动不再覆盖代码，这个状态
+     必须看得见：原来它藏在代码里，用户只看到代码不动，以为坏了就去刷新网页。
+     做成按钮是为了给一条一键找回的路，不用再去工具条上找「按积木重新生成」。 */
+  .srcstate {
+    flex: none; font-size: 10px; font-weight: 600; letter-spacing: .2px; line-height: 1.6;
+    padding: 1px 8px; border-radius: 999px; cursor: pointer; white-space: nowrap;
+    background: var(--panel2); color: var(--dim); border: 1px solid var(--line);
+    font-family: inherit; transition: color .12s, border-color .12s, background-color .12s;
+  }
+  .srcstate:hover { border-color: var(--acc); color: var(--fg); }
+  .srcstate:focus-visible { outline: 2px solid var(--acc); outline-offset: 1px; }
+  .srcstate.touched { background: var(--tag-warn-bg); color: var(--warn); border-color: var(--warn); }
+  .srcstate.touched:hover { color: var(--warn); border-color: var(--warn); filter: brightness(1.12); }
+
   #blocklyDiv { flex: 1; min-height: 0; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: var(--board); }
 
   /* Blockly 自带的工具箱样式是「深底白字」，这里是浅底，所以分组名要改成深色。
@@ -259,8 +273,8 @@
   <div class="pane right">
     <section>
       <div class="cap">
-        <span id="srccap">生成的 C++ 代码 main.cc（可直接微调后再编译；改过积木会被覆盖，用「按积木重新生成」找回）</span>
-        <span class="cap-right"><span id="srclen"></span></span>
+        <span id="srccap">生成的 C++ 代码 main.cc（可直接微调后再编译；手改之后积木的改动不再覆盖这里，点「按积木重新生成」找回）</span>
+        <span class="cap-right"><button id="srcstate" class="srcstate" type="button">跟随积木</button><span id="srclen"></span></span>
       </div>
       <div id="editor"></div>
     </section>
