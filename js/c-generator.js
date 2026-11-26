@@ -1069,11 +1069,16 @@
           if (n && n.type === 'double') {
             info('重复次数是小数，循环变量会提升成 double 再比较；要整数次数请先转成 int。', block);
           }
+          /* 生成出来就是个真 for，break / continue 当然合法。ctx.loops 是「跳出循环 /
+             跳过本轮」唯一的合法性依据，这里不计数就会误报「只能放在循环积木里面」。
+             次数表达式在循环外求值，所以计数要等 sub() 之后再起。 */
+          ctx.loops++;
           pushScope(ctx);
           declare(ctx, iv, 'int', 'var', block);
           startLine(ctx, 'for (int ' + iv + ' = 0; ' + iv + ' < ' + (n ? wrap(n, P_CMP) : '0') + '; ' + iv + ' += 1)');
           emitChainWithBrace(ctx, block, 'DO');
           popScope(ctx);
+          ctx.loops--;
           return;
         }
 
@@ -1098,10 +1103,14 @@
           };
           pushScope(ctx);
           declare(ctx, name, 'int', 'var', block);
+          /* 同上：计数循环也是循环，体内的 break / continue 合法。
+             起点/终点/步长都在循环外求值，计数在它们之后才起。 */
+          ctx.loops++;
           startLine(ctx, 'for (int ' + name + ' = ' + cast(from, '0') + '; ' + name
             + (down ? ' >= ' : ' <= ') + cast(to, '0') + '; ' + name + ' += ' + cast(step, '1') + ')');
           emitChainWithBrace(ctx, block, 'DO');
           popScope(ctx);
+          ctx.loops--;
           return;
         }
 
