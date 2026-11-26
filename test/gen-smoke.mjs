@@ -654,6 +654,89 @@ console.log('\n══════ 文本变量 ══════');
   check('int 变量赋单个字符仍然正常（跟文本无关，不该被文本规则误伤）', r.code.includes('x = \'A\';'));
 }
 
+/* ---------------- break / continue：四种循环都得算循环 ---------------- */
+/* 老师反馈过「break / continue 只能放 while，放进 for 就报错」。根因是生成器的
+   ctx.loops 只在 while / until 里计数，「计数循环」和「重复 N 次」漏了 —— 可它们
+   生成出来同样是真 for。这一节把四种循环 × 两种语句 × 两门语言全过一遍，再确认
+   「循环外」「函数体里」「循环结束之后」照旧报错：修的是漏计数，不是把守卫拆掉。 */
+console.log('\n══════ break / continue 与四种循环 ══════');
+{
+  const CN = { for: '计数循环', repeat: '重复 N 次', while: '当…就重复', until: '重复直到' };
+  const loopOf = (kind, body) => {
+    if (kind === 'for') return blk('for', { NAME: 'i' }, { FROM: num(1), TO: num(10), STEP: num(1), DO: body });
+    if (kind === 'repeat') return blk('repeat', {}, { TIMES: num(10), DO: body });
+    if (kind === 'while') return blk('while', {}, { COND: num(1), DO: body });
+    return blk('until', {}, { COND: num(0), DO: body });
+  };
+  const run = (roots, lang) => { idSeq = 0; return CGen.generate(workspace(roots), { annotate: false, lang }); };
+  const loopErrs = (r) => r.diagnostics.filter((d) => d.sev === 'error' && /只能放在循环积木里面/.test(d.msg));
+  const KINDS = ['for', 'repeat', 'while', 'until'];
+
+  for (const lang of ['c', 'cpp']) {
+    for (const kind of KINDS) {
+      for (const stmt of ['break', 'continue']) {
+        const r = run([blk('main', {}, { BODY: [loopOf(kind, [blk(stmt, {}, {})])] })], lang);
+        check('[' + lang + '] ' + CN[kind] + ' 里的 ' + stmt + ' 合法（不报错、代码里有 ' + stmt + ';）',
+          !r.hasError && loopErrs(r).length === 0 && r.code.includes(stmt + ';'));
+      }
+    }
+    /* 课堂上最常见的写法：计数循环里套一个「如果…就跳出」 */
+    const inIf = run([blk('main', {}, {
+      BODY: [blk('for', { NAME: 'i' }, {
+        FROM: num(1), TO: num(10), STEP: num(1),
+        DO: [blk('if', {}, {
+          COND: blk('compare', { OP: '==' }, { A: vget('i'), B: num(5) }, true),
+          DO: [blk('break', {}, {})],
+        })],
+      })],
+    })], lang);
+    check('[' + lang + '] 计数循环 → 如果 → break 合法', !inIf.hasError && loopErrs(inIf).length === 0);
+
+    /* 嵌套：外层 while、内层 for，里外都能跳 */
+    const nested = run([blk('main', {}, {
+      BODY: [blk('while', {}, {
+        COND: num(1),
+        DO: [blk('for', { NAME: 'i' }, { FROM: num(1), TO: num(3), STEP: num(1), DO: [blk('continue', {}, {})] }),
+          blk('break', {}, {})],
+      })],
+    })], lang);
+    check('[' + lang + '] 嵌套循环里外两层的 break / continue 都合法', !nested.hasError && loopErrs(nested).length === 0);
+
+    /* 循环外：照旧一条错误，而且不能因为修了漏计数就放行 */
+    for (const stmt of ['break', 'continue']) {
+      const stray = run([blk('main', {}, { BODY: [blk(stmt, {}, {})] })], lang);
+      check('[' + lang + '] 循环外的 ' + stmt + ' 仍报且只报一条', stray.hasError && loopErrs(stray).length === 1);
+    }
+
+    /* 计数器要平衡：循环结束之后再放一个 break，只该报后面那一个 */
+    const after = run([blk('main', {}, {
+      BODY: [loopOf('for', [blk('break', {}, {})]), blk('break', {}, {})],
+    })], lang);
+    check('[' + lang + '] 循环体内合法 + 循环结束后非法 → 只报 1 条（loops 计数进出平衡）', loopErrs(after).length === 1);
+
+    /* 兄弟循环：前一个 for 减回去的计数不能影响后一个 */
+    const siblings = run([blk('main', {}, {
+      BODY: [loopOf('for', [blk('break', {}, {})]), loopOf('repeat', [blk('continue', {}, {})])],
+    })], lang);
+    check('[' + lang + '] 两个并列循环各自体内的 break / continue 都合法', !siblings.hasError && loopErrs(siblings).length === 0);
+
+    /* 函数体是另一份 ctx（loops 从 0 起），外面有循环也不算数 */
+    const inFunc = run([
+      blk('func_def', { NAME: 'f', RET: 'void', NP: '0' }, { BODY: [blk('break', {}, {})] }),
+      blk('main', {}, { BODY: [loopOf('while', [blk('call', { NAME: 'f' }, {})])] }),
+    ], lang);
+    check('[' + lang + '] 函数体里的 break 不算在调用处的循环里，仍报错', loopErrs(inFunc).length === 1);
+  }
+
+  /* 生成的形状也要钉住：光「不报错」不够，得确实是个能 break 的 for */
+  const shape = run([blk('main', {}, { BODY: [loopOf('for', [blk('break', {}, {})])] })], 'c');
+  check('计数循环 + break 生成 for (int i = 1; i <= 10; i += 1) { … break; … }',
+    shape.code.includes('for (int i = 1; i <= 10; i += 1) {') && /\{\s*break;\s*\}/.test(shape.code));
+  const shape2 = run([blk('main', {}, { BODY: [loopOf('repeat', [blk('continue', {}, {})])] })], 'c');
+  check('重复 N 次 + continue 生成 for (int c_i1 = 0; c_i1 < 10; c_i1 += 1) { … continue; … }',
+    shape2.code.includes('for (int c_i1 = 0; c_i1 < 10; c_i1 += 1) {') && /\{\s*continue;\s*\}/.test(shape2.code));
+}
+
 console.log('\n' + (fails ? '✗ ' + fails + ' 项不通过' : '✓ 全部断言通过'));
 /* 允许直接在嵌入式 Node 环境里跑（没有 process 就不退出） */
 if (typeof process !== 'undefined' && process.exit) process.exit(fails ? 1 : 0);
