@@ -408,7 +408,7 @@
               + '把「声明」积木挪到前面，或者换成别的名字。', block);
             return { code: name, type: 'int', prec: P_ATOM };
           }
-          if (v.kind === 'array') { err('「' + name + '」是数组，要写「a 的第 i 项」才能取值。', block); }
+          if (v.kind === 'array') { err('「' + name + '」是数组，要写「a[i]」才能取值。', block); }
           return { code: name, type: v.type, prec: P_ATOM };
         }
 
@@ -452,10 +452,10 @@
             : promote(isStr(a.type) ? 'int' : a.type, isStr(b.type) ? 'int' : b.type);
           const prec = (op === '*' || op === '/' || op === '%') ? P_MUL : P_ADD;
           if (op === '%' && (a.type === 'double' || b.type === 'double')) {
-            err('取余 %% 只能用于整数；右边是小数，请先用「值类型转换」取整。', block);
+            err('取余 %% 只能用于整数；右边是小数，请先用「→ 整数」取整。', block);
           }
           if (op === '/' && a.type === 'int' && b.type === 'int') {
-            info('两个 int 相除会丢掉小数部分（7 / 2 得 3）。想要 3.5，把其中一边用「转成小数」包一下。', block);
+            info('两个 int 相除会丢掉小数部分（7 / 2 得 3）。想要 3.5，把其中一边用「→ 小数」包一下。', block);
           }
           const left = wrap(a, prec);
           /* 减法和除法不满足结合律：右操作数只要同样紧就得加括号
@@ -575,8 +575,8 @@
       const wantValue = !!block.outputConnection;
       if (!fname || fname === '__none__' || !d) {
         err('调用积木还没选函数，或者那个函数已经被删掉了。'
-          + (wantValue ? '（有返回值的函数要用「函数 … 的返回值」这块积木调用）'
-            : '（无返回值 void 的函数才用「执行函数」这块积木）'), block);
+          + (wantValue ? '（有返回值的函数要用「调用」值块 —— 圆头、能塞进数值槽的那块）'
+            : '（无返回值 void 的函数才用「调用」语句块 —— 带上下凹槽的那块）'), block);
         return { code: '0', type: 'int', prec: P_ATOM };
       }
       const args = [];
@@ -608,7 +608,7 @@
         parts.push(top(a.e));
       }
       if (wantValue && d.ret === 'void') {
-        err('函数 ' + fname + ' 是 void，没有返回值可用；请改用「执行函数」积木。', block);
+        err('函数 ' + fname + ' 是 void，没有返回值可用；请改用「调用」语句块。', block);
       }
       return { code: fname + '(' + parts.join(', ') + ')', type: d.ret === 'void' ? 'int' : d.ret, prec: P_ATOM };
     }
@@ -639,7 +639,7 @@
         const idx = I(block.getInputTargetBlock('IDX'), ctx, name);
         return { code: '&' + name + '[' + idx + ']', type: v.type, block: block };
       }
-      err('scanf 的槽位只吃「变量」或「数组的第 i 项」积木：它要的是能存放数据的地址，'
+      err('scanf 的槽位只吃「变量」或「a[i]」积木：它要的是能存放数据的地址，'
         + '算出来的数值（比如 3 + 4）没法往里写。', block);
       return null;
     }
@@ -769,7 +769,7 @@
           if (!v) {
             err('赋值目标「' + name + '」在这里不可见，先用「声明变量」积木建它。', block);
           } else if (v.kind === 'array') {
-            err('「' + name + '」是数组，要写「把 a 的第 i 项设为 …」。', block);
+            err('「' + name + '」是数组，要写「a[i] = …」。', block);
           } else if (e) {
             if (isStr(e.type) && !isStr(v.type)) {
               err('不能把整块文本赋给 ' + tName(v.type) + ' 变量「' + name + '」。'
@@ -892,7 +892,7 @@
               }
             } else if (want === 'double') {
               if (got !== 'double') err('%' + sp.conv + ' 要 double，第 ' + (i + 1) + ' 个参数是 ' + tName(got)
-                + '。整数请改用 %d，或先用「转成小数」积木。', a.block);
+                + '。整数请改用 %d，或先用「→ 小数」积木。', a.block);
             } else if (want === 'char') {
               if (got === 'double') err('%c 要字符/整数，第 ' + (i + 1) + ' 个参数是小数。', a.block);
               else if (isStr(got)) err('%c 打印的是单个字符，第 ' + (i + 1) + ' 个参数是一整块文本；整块文本请用 %s。', a.block);
@@ -953,7 +953,7 @@
                 const nm = t.block ? String(t.block.getFieldValue('VAR') || '') : '';
                 err('%s 不能往文本变量' + (nm ? '「' + nm + '」' : '') + '里写：scanf 要的是 char*，'
                   + '而 std::string 这一刻还没分配内存，写进去就是往空指针里倒字符。'
-                  + '读文本请改用「读入到变量」积木' + (nm ? '（它会出 std::cin >> ' + nm + ';）' : '') + '。', block);
+                  + '读文本请改用「读入」积木' + (nm ? '（它会出 std::cin >> ' + nm + ';）' : '') + '。', block);
               } else {
                 err('%s 要的是字符数组名（一整块缓冲区），第 ' + (i + 1) + ' 个槽放的是 ' + tName(t.type)
                   + '；先用「声明变量」建一个类型为「文本」的变量，再把它放进这个槽。', block);
@@ -962,8 +962,8 @@
             }
             if (isStr(t.type)) {
               err('第 ' + (i + 1) + ' 个目标是文本，不能用 ' + sp.text + ' 读入'
-                + (t.type === 'cstr' ? '；文本请用 %s（会自动带上缓冲区上限），或改用「读入到变量」积木。'
-                                     : '；请改用「读入到变量」积木。'), block);
+                + (t.type === 'cstr' ? '；文本请用 %s（会自动带上缓冲区上限），或改用「读入」积木。'
+                                     : '；请改用「读入」积木。'), block);
             }
             if (want === 'double' && sp.mod.indexOf('l') < 0) {
               err('scanf 读小数必须写 %lf：'
@@ -993,10 +993,10 @@
 
         case 'read': {
           const name = block.getFieldValue('VAR');
-          if (!name || name === '__none__') { err('这块「读入到变量」积木还没选变量。', block); return; }
+          if (!name || name === '__none__') { err('这块「读入」积木还没选变量。', block); return; }
           const v = lookup(ctx, name);
           if (!v) { err('读入目标「' + name + '」在这里不可见，先声明它。', block); return; }
-          if (v.kind === 'array') { err('「' + name + '」是数组，请用「读入到数组的第 i 项」。', block); return; }
+          if (v.kind === 'array') { err('「' + name + '」是数组，请用「读入 a[i]」。', block); return; }
           if (v.type === 'bool') {
             err(cpp ? 'bool 变量不适合直接读入：cin 会把 0/非 0 当 false/true，请先读进 int 变量再赋值。'
                     : 'bool 没有合适的读入格式；请先读进一个 int 变量。', block);
@@ -1029,7 +1029,7 @@
 
         case 'read_arr': {
           const name = block.getFieldValue('ARR');
-          if (!name || name === '__none__') { err('这块「读入到数组」积木还没选数组。', block); return; }
+          if (!name || name === '__none__') { err('这块「读入 a[i]」积木还没选数组。', block); return; }
           const v = lookup(ctx, name);
           if (!v || v.kind !== 'array') { err('数组「' + name + '」在这里不可见。', block); return; }
           if (v.type === 'bool') {
@@ -1069,8 +1069,8 @@
           if (n && n.type === 'double') {
             info('重复次数是小数，循环变量会提升成 double 再比较；要整数次数请先转成 int。', block);
           }
-          /* 生成出来就是个真 for，break / continue 当然合法。ctx.loops 是「跳出循环 /
-             跳过本轮」唯一的合法性依据，这里不计数就会误报「只能放在循环积木里面」。
+          /* 生成出来就是个真 for，break / continue 当然合法。ctx.loops 是「跳出 /
+             跳过」唯一的合法性依据，这里不计数就会误报「只能放在循环积木里面」。
              次数表达式在循环外求值，所以计数要等 sub() 之后再起。 */
           ctx.loops++;
           pushScope(ctx);
@@ -1131,7 +1131,7 @@
           ctx.lines.push(IND.repeat(ctx.ind) + 'do {');
           pushScope(ctx);
           const head = block.getInputTargetBlock('DO');
-          if (!head) info('「重复执行直到」的执行槽是空的。', block);
+          if (!head) info('「重复 … 直到」的执行槽是空的。', block);
           ctx.ind++;
           emitChain(ctx, head);
           ctx.ind--;
@@ -1142,18 +1142,18 @@
         }
 
         case 'break':
-          if (!ctx.loops) err('「跳出循环」只能放在循环积木里面。', block);
+          if (!ctx.loops) err('「跳出」只能放在循环积木里面。', block);
           line(ctx, 'break;', block);
           return;
 
         case 'continue':
-          if (!ctx.loops) err('「跳过本轮」只能放在循环积木里面。', block);
+          if (!ctx.loops) err('「跳过」只能放在循环积木里面。', block);
           line(ctx, 'continue;', block);
           return;
 
         case 'call': {
           if (block.outputConnection) {
-            err('这块「函数 … 的返回值」是表达式，得塞进某个数值槽；想当语句执行请改用「执行函数」。', block);
+            err('这块「调用」是值块（圆头），得塞进某个数值槽；想当语句执行请改用带凹槽的那块「调用」。', block);
             return;
           }
           const r = callExpr(block, ctx);
@@ -1355,10 +1355,10 @@
       case 'main': return '主程序';
       case 'var_decl': return '声明 ' + f('NAME');
       case 'arr_decl': return '数组 ' + f('NAME');
-      case 'var_set': return f('VAR') + ' 赋值';
+      case 'var_set': return f('VAR') + ' =';
       case 'var_get': return f('VAR');
-      case 'arr_get': return f('ARR') + ' 的下标';
-      case 'arr_set': return f('ARR') + ' 赋值';
+      case 'arr_get': return f('ARR') + '[i]';
+      case 'arr_set': return f('ARR') + '[i] =';
       case 'print': return '输出';
       case 'read': return '读入 ' + f('VAR');
       case 'read_arr': return '读入 ' + f('ARR');
@@ -1370,16 +1370,17 @@
       case 'bool_lit': return f('V');
       case 'arith': return f('OP');
       case 'compare': return f('OP');
-      /* 诊断列表里的标签跟积木脸上写的保持一致：积木上是 && / || / ! / -，
-         这里就别再写「且 / 或 / 非 / 负」，否则学生要在两套说法之间再翻译一次。 */
+      /* 诊断列表里的标签跟积木脸上写的保持一致：脸上是 && / || / ! / - / = / [i] / →，
+         这里就别再写「且 / 或 / 非 / 负 / 赋值 / 的下标 / 转成」，
+         否则学生要在两套说法之间再翻译一次。 */
       case 'logic': return f('OP');
       case 'not': return '!';
       case 'neg': return '-';
-      case 'cast': return '转成' + f('TO');
+      case 'cast': return '→' + f('TO');
       case 'if': return '如果';
-      case 'repeat': return '重复执行';
-      case 'while': return '当…循环';
-      case 'until': return '重复直到';
+      case 'repeat': return '重复';
+      case 'while': return '当…重复';
+      case 'until': return '重复…直到';
       case 'for': return '循环 ' + f('NAME');
       case 'break': return 'break';
       case 'continue': return 'continue';

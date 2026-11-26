@@ -8,6 +8,16 @@
  * 变量 / 数组 / 函数三类下拉是动态的：菜单打开那一刻重新扫描工作区，并且
  * 只列出当前这块积木"看得见"的名字（沿执行顺序走到自己这一路上出现过的
  * 声明、for 的循环变量、所在函数的形参），越界引用在源头上就少一半。
+ *
+ * 脸上文字的规则（这个阶段的孩子只认图不认字，脸越短越好）：
+ *   1. 中文只留动作词，1~2 个字：重复 / 当 / 直到 / 跳出 / 跳过 / 读入 / 输出 / 调用 / 返回；
+ *   2. 结构关系一律用 C 的符号，不用中文连接词：赋值 =、下标 [i]、转换 →、文本 "…"、字符 '…'；
+ *   3. 「执行 / 就 / 为止 / 的值 / 的第…项 / 初始值（可留空）」这类填充词不上脸，
+ *      形状（凹槽、榫头、圆头）已经把「接哪儿」说清楚了；
+ *   4. 解释、对应哪行 C、坑在哪，全部收进 setTooltip，悬停才看；
+ *   5. 每块积木的 tooltip 开头给一个口语名（声明变量 / 变量赋值 / 值类型转换…），
+ *      生成器的诊断用同一套名字指路，孩子悬停就能对上号。
+ * 改脸的时候请连带改 c-generator.js 的诊断措辞和 test/gen-smoke.mjs 的断言。
  */
 'use strict';
 
@@ -33,15 +43,17 @@
     entry: '#5CB1D6',
   };
 
-  const EMPTY = '（先拖一个「声明变量」积木）';
-  const EMPTY_ARR = '（先拖一个「声明数组」积木）';
-  const EMPTY_FN_VOID = '（还没有 void 函数：先拖「函数」积木）';
-  const EMPTY_FN_VAL = '（还没有带返回值的函数：先拖「函数」积木）';
-  const EMPTY_READ = '（先声明一个 int/double/char/文本 变量）';
+  /* 下拉里「没得选」时脸上显示的那句话。要短：孩子只看脸，长解释交给生成器的诊断。
+     但仍要说清是哪一种「没有」——没声明 / 没接进程序体 / 声明在后面，三种出路不一样。 */
+  const EMPTY = '（先声明一个变量）';
+  const EMPTY_ARR = '（先声明一个数组）';
+  const EMPTY_FN_VOID = '（先建一个 void 函数）';
+  const EMPTY_FN_VAL = '（先建一个有返回值的函数）';
+  const EMPTY_READ = '（先声明一个变量）';
   /* 工作区里有声明，但按 C 的作用域规则对这块积木不可见时，说清楚为什么 */
-  const EMPTY_FLOATING = '（这块还没接进语句里：把它拖进积木的凹槽，才能看到声明）';
-  const EMPTY_NOT_IN_PROGRAM = '（没接到「主程序」/「函数」里：声明放在外面时，要先拖进程序体、且放在这块之前）';
-  const EMPTY_SCOPE = '（这一层里没有可见的声明：把「声明」拖进同一个程序体，并放在这块之前）';
+  const EMPTY_FLOATING = '（还没接进程序体）';
+  const EMPTY_NOT_IN_PROGRAM = '（声明要拖进程序体，且放在这块之前）';
+  const EMPTY_SCOPE = '（这一层没有可见的声明）';
 
   /* 可变参数积木用的 +/− 图标：直接内联 data-URI，省掉一条 media 路径依赖 */
   const svgIcon = (path) => 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(
@@ -394,7 +406,6 @@
       this.cKind = 'if';
       this.setColour(COL.ctrl);
       this.appendValueInput('COND').setCheck('Value').appendField('如果');
-      this.appendDummyInput('TAILCOND').appendField('就执行');
       this.appendStatementInput('DO').setCheck(STMT);
       this.appendDummyInput('MID').appendField(
         new Blockly.FieldCheckbox('FALSE', function (v) {
@@ -436,7 +447,7 @@
     init: function () {
       this.cKind = 'repeat';
       this.setColour(COL.ctrl);
-      this.appendValueInput('TIMES').setCheck('Value').appendField('重复执行');
+      this.appendValueInput('TIMES').setCheck('Value').appendField('重复');
       this.appendDummyInput('N').appendField('次');
       this.appendStatementInput('DO').setCheck(STMT);
       this.setInputsInline(true);
@@ -451,7 +462,7 @@
       this.cKind = 'while';
       this.setColour(COL.ctrl);
       this.appendValueInput('COND').setCheck('Value').appendField('当');
-      this.appendDummyInput('N').appendField('时，重复执行');
+      this.appendDummyInput('N').appendField('重复');
       this.appendStatementInput('DO').setCheck(STMT);
       this.setInputsInline(true);
       this.setPreviousStatement(true, STMT);
@@ -464,9 +475,8 @@
     init: function () {
       this.cKind = 'until';
       this.setColour(COL.ctrl);
-      this.appendStatementInput('DO').setCheck(STMT).appendField('重复执行');
+      this.appendStatementInput('DO').setCheck(STMT).appendField('重复');
       this.appendValueInput('COND').setCheck('Value').appendField('直到');
-      this.appendDummyInput('N').appendField('为止');
       this.setInputsInline(false);
       this.setPreviousStatement(true, STMT);
       this.setNextStatement(true, STMT);
@@ -478,11 +488,11 @@
     init: function () {
       this.cKind = 'for';
       this.setColour(COL.ctrl);
-      this.appendDummyInput('A').appendField('令').appendField(nameField('i'), 'NAME');
+      this.appendDummyInput('A').appendField(nameField('i'), 'NAME');
       this.appendValueInput('FROM').setCheck('Value').appendField('从');
       this.appendValueInput('TO').setCheck('Value').appendField('到');
-      this.appendValueInput('STEP').setCheck('Value').appendField('每次加');
-      this.appendStatementInput('DO').setCheck(STMT).appendField('执行');
+      this.appendValueInput('STEP').setCheck('Value').appendField('步长');
+      this.appendStatementInput('DO').setCheck(STMT);
       this.setInputsInline(true);
       this.setPreviousStatement(true, STMT);
       this.setNextStatement(true, STMT);
@@ -494,9 +504,9 @@
     init: function () {
       this.cKind = 'break';
       this.setColour(COL.ctrl);
-      this.appendDummyInput().appendField('跳出循环');
+      this.appendDummyInput().appendField('跳出');
       this.setPreviousStatement(true, STMT);
-      this.setTooltip('break; 立刻跳出最近的一层循环。');
+      this.setTooltip('跳出（break;）：立刻跳出最近的一层循环。\n四种循环里都能用：计数循环、重复 N 次、当…重复、重复…直到。');
     },
   };
 
@@ -504,10 +514,10 @@
     init: function () {
       this.cKind = 'continue';
       this.setColour(COL.ctrl);
-      this.appendDummyInput().appendField('跳过本轮');
+      this.appendDummyInput().appendField('跳过');
       this.setPreviousStatement(true, STMT);
       this.setNextStatement(true, STMT);
-      this.setTooltip('continue; 结束本轮，直接进入下一轮判断。');
+      this.setTooltip('跳过（continue;）：结束本轮，直接进入下一轮判断。\n四种循环里都能用：计数循环、重复 N 次、当…重复、重复…直到。');
     },
   };
 
@@ -517,14 +527,12 @@
       this.cKind = 'var_decl';
       this.setColour(COL.vari);
       this.appendDummyInput()
-        .appendField('声明')
         .appendField(scalarTypeField(), 'TYPE')
-        .appendField('变量')
         .appendField(nameField('x'), 'NAME');
-      this.appendValueInput('INIT').setCheck('Value').appendField('初始值（可留空）');
+      this.appendValueInput('INIT').setCheck('Value').appendField('=');
       this.setPreviousStatement(true, STMT);
       this.setNextStatement(true, STMT);
-      this.setTooltip('对应 int x = 5; / double t; / char c; / bool ok;。\n'
+      this.setTooltip('声明变量：对应 int x = 5; / double t; / char c; / bool ok;。= 右边的槽留空就只声明不赋值。\n'
         + '类型选「文本」时：C++ 出 std::string s;，C 出 char s[256];（最多存 255 个字符，一个汉字占 3 字节）。\n'
         + '声明之后的语句才能用它；放在循环里就等于每轮重新初始化。');
     },
@@ -535,12 +543,11 @@
       this.cKind = 'var_set';
       this.setColour(COL.vari);
       this.appendValueInput('VALUE').setCheck('Value')
-        .appendField('把')
         .appendField(dynField((b) => varList(b, { kind: 'var' }), 'var'), 'VAR')
-        .appendField('设为');
+        .appendField('=');
       this.setPreviousStatement(true, STMT);
       this.setNextStatement(true, STMT);
-      this.setTooltip('对应 x = 表达式;。这是赋值，不是数学等号：右边算完再存进左边。');
+      this.setTooltip('变量赋值：对应 x = 表达式;。这是赋值，不是数学等号：右边算完再存进左边。');
     },
   };
 
@@ -549,10 +556,9 @@
       this.cKind = 'var_get';
       this.setColour(COL.vari);
       this.appendDummyInput()
-        .appendField('变量')
         .appendField(dynField((b) => varList(b, { kind: 'var' }), 'var'), 'VAR');
       this.setOutput(true, ['LValue', 'Value']);
-      this.setTooltip('读取变量的值，可以塞进任何需要数值或文本的地方；\n'
+      this.setTooltip('变量（值块）：读取变量的值，可以塞进任何需要数值或文本的地方；\n'
         + '放进 scanf 的槽位时会自动取地址（&x）；文本变量在 C 里就是一块字符数组，数组名本身是地址，不再加 &。');
     },
   };
@@ -562,16 +568,15 @@
       this.cKind = 'arr_decl';
       this.setColour(COL.vari);
       this.appendDummyInput()
-        .appendField('声明')
         .appendField(scalarTypeField(true), 'TYPE')
-        .appendField('数组')
         .appendField(nameField('a'), 'NAME')
-        .appendField('长度')
-        .appendField(new Blockly.FieldNumber(10, 1, 65536, 1), 'LEN');
+        .appendField('[')
+        .appendField(new Blockly.FieldNumber(10, 1, 65536, 1), 'LEN')
+        .appendField(']');
       this.setPreviousStatement(true, STMT);
       this.setNextStatement(true, STMT);
-      this.setTooltip('对应 int a[10];。长度是编译期常量；下标从 0 开始，合法范围 0 ~ 长度-1。\n'
-        + '数组的元素类型没有「文本」这一档：要一整块文本，请用「声明变量」选文本类型（C 里它就是一块字符数组）。');
+      this.setTooltip('声明数组：对应 int a[10];。方括号里是长度，编译期常量；下标从 0 开始，合法范围 0 ~ 长度-1。\n'
+        + '数组的元素类型没有「文本」这一档：要一整块文本，请用声明变量积木选文本类型（C 里它就是一块字符数组）。');
     },
   };
 
@@ -581,11 +586,11 @@
       this.setColour(COL.vari);
       this.appendValueInput('IDX').setCheck('Value')
         .appendField(dynField((b) => varList(b, { kind: 'array' }), 'array'), 'ARR')
-        .appendField('的第');
-      this.appendDummyInput('TAIL').appendField('项');
+        .appendField('[');
+      this.appendDummyInput('TAIL').appendField(']');
       this.setInputsInline(true);
       this.setOutput(true, ['LValue', 'Value']);
-      this.setTooltip('对应 a[i]。越界是未定义行为，C 运行时不会替你拦。\n放进 scanf 的槽位时会自动写成 &a[i]。');
+      this.setTooltip('数组的第 i 项（a[i]）：越界是未定义行为，C 运行时不会替你拦。\n放进 scanf 的槽位时会自动写成 &a[i]。');
     },
   };
 
@@ -594,14 +599,13 @@
       this.cKind = 'arr_set';
       this.setColour(COL.vari);
       this.appendValueInput('IDX').setCheck('Value')
-        .appendField('把')
         .appendField(dynField((b) => varList(b, { kind: 'array' }), 'array'), 'ARR')
-        .appendField('的第');
-      this.appendValueInput('VALUE').setCheck('Value').appendField('项设为');
+        .appendField('[');
+      this.appendValueInput('VALUE').setCheck('Value').appendField('] =');
       this.setInputsInline(true);
       this.setPreviousStatement(true, STMT);
       this.setNextStatement(true, STMT);
-      this.setTooltip('对应 a[i] = 表达式;。');
+      this.setTooltip('给数组的第 i 项赋值：对应 a[i] = 表达式;。');
     },
   };
 
@@ -626,7 +630,7 @@
       this.cKind = 'read';
       this.setColour(COL.io);
       this.appendDummyInput()
-        .appendField('读入到变量')
+        .appendField('读入')
         .appendField(dynField(
           (b) => varList(b, { kind: 'var', types: ['int', 'double', 'char', 'string'] }),
           { kind: 'var', none: EMPTY_READ },
@@ -644,14 +648,14 @@
       this.cKind = 'read_arr';
       this.setColour(COL.io);
       this.appendValueInput('IDX').setCheck('Value')
-        .appendField('读入到数组')
+        .appendField('读入')
         .appendField(dynField((b) => varList(b, { kind: 'array' }), 'array'), 'ARR')
-        .appendField('的第');
-      this.appendDummyInput('TAIL').appendField('项');
+        .appendField('[');
+      this.appendDummyInput('TAIL').appendField(']');
       this.setInputsInline(true);
       this.setPreviousStatement(true, STMT);
       this.setNextStatement(true, STMT);
-      this.setTooltip('对应 scanf("%d", &a[i])。');
+      this.setTooltip('读入数组的第 i 项：对应 scanf("%d", &a[i])。');
     },
   };
 
@@ -670,7 +674,7 @@
           for (let i = 0; i < this.nargs_; i++) {
             this.appendValueInput('ARG' + i)
               .setCheck(this.check_)
-              .appendField('    ' + cfg.argLabel + ' ' + (i + 1) + '：');
+              .appendField('    ' + (i + 1) + ':');
           }
           const ctrl = this.appendDummyInput('CTRL').appendField('   ');
           ctrl.appendField(new Blockly.FieldImage(ICON_ADD, 20, 20, '+', function () {
@@ -682,7 +686,7 @@
             self.nargs_ = Math.max(0, self.nargs_ - 1);
             self.rebuildArgs_();
           }));
-          ctrl.appendField(new Blockly.FieldLabel('（' + cfg.noun + ' ' + this.nargs_ + ' 个）'));
+          ctrl.appendField(new Blockly.FieldLabel('（' + this.nargs_ + ' 个）'));
           /* init 阶段还没有 SVG，这时候渲染会在 null 上 setAttribute；
              真正的绘制交给调用方随后的 initSvg/render。 */
           if (this.svgGroup_) {
@@ -715,28 +719,28 @@
   }
 
   mutableArgBlock({
-    type: 'c_printf', cKind: 'printf', headLabel: 'printf 格式', noun: '参数',
-    argLabel: '参数', check: ['Value', 'Text'], fmtDefault: '%d\\n', start: 1,
+    type: 'c_printf', cKind: 'printf', headLabel: 'printf',
+    check: ['Value', 'Text'], fmtDefault: '%d\\n', start: 1,
     tooltip: '对应 printf("格式串", 参数…);。格式串里照 C 的写法填，例如 %d、%.2f、%g、%c、%s、\\n。\n'
       + '生成器会数一遍格式说明符和参数个数是否对得上，这是 C 初学者最常踩的坑。\n'
       + '%s 配 C++ 的文本变量时会自动补 .c_str()：std::string 对象本身不能进可变参数。',
   });
 
   mutableArgBlock({
-    type: 'c_scanf', cKind: 'scanf', headLabel: 'scanf 格式', noun: '目标',
-    argLabel: '放入', check: 'LValue', fmtDefault: '%d', start: 1,
+    type: 'c_scanf', cKind: 'scanf', headLabel: 'scanf',
+    check: 'LValue', fmtDefault: '%d', start: 1,
     tooltip: '对应 scanf("格式串", &x, …);。槽位只吃变量或数组元素（表达式进不来），& 由生成器补。\n'
       + '读 char 时记得在 %c 前面留个空格，否则会先吃掉上一行的换行符。\n'
-      + '%s 配 C 的文本变量会自动加上限（%255s），并且不写 &（数组名就是地址）；C++ 的 std::string 不能这么读，请改用「读入到变量」。',
+      + '%s 配 C 的文本变量会自动加上限（%255s），并且不写 &（数组名就是地址）；C++ 的 std::string 不能这么读，请改用「读入」积木。',
   });
 
   Blockly.Blocks['c_text'] = {
     init: function () {
       this.cKind = 'text';
       this.setColour(COL.io);
-      this.appendDummyInput().appendField('文本').appendField(new Blockly.FieldTextInput('你好'), 'TEXT');
+      this.appendDummyInput().appendField('"').appendField(new Blockly.FieldTextInput('你好'), 'TEXT').appendField('"');
       this.setOutput(true, 'Text');
-      this.setTooltip('字符串字面量 "…"。双引号、反斜杠、% 都会自动转义。');
+      this.setTooltip('文本字面量 "…"。双引号、反斜杠、% 都会自动转义。');
     },
   };
 
@@ -744,7 +748,7 @@
     init: function () {
       this.cKind = 'char_lit';
       this.setColour(COL.io);
-      this.appendDummyInput().appendField('字符').appendField(new Blockly.FieldTextInput('a'), 'CH');
+      this.appendDummyInput().appendField("'").appendField(new Blockly.FieldTextInput('a'), 'CH').appendField("'");
       this.setOutput(true, 'Value');
       this.setTooltip("字符常量 'a'，本质是个小整数，可以和数字比较、参与运算。");
     },
@@ -772,7 +776,7 @@
       this.setInputsInline(true);
       this.setOutput(true, 'Value');
       this.setTooltip('对应 + - * / %，积木上写的就是代码里的那个符号。\n'
-        + '% 是取余（7 % 2 得 1）；两个整数相除会截断（7 / 2 得 3），想要 3.5 就用「运算 → 值类型转换」先把一边转成 double。');
+        + '% 是取余（7 % 2 得 1）；两个整数相除会截断（7 / 2 得 3），想要 3.5 就用「运算」里的 → 积木先把一边转成 double。');
     },
   };
 
@@ -791,12 +795,11 @@
       this.cKind = 'cast';
       this.setColour(COL.math);
       this.appendValueInput('A').setCheck('Value');
-      this.appendDummyInput().appendField('转成').appendField(
-        new Blockly.FieldDropdown([['整数', 'int'], ['小数', 'double'], ['字符', 'char']]), 'TO')
-        .appendField('的值');
+      this.appendDummyInput().appendField('→').appendField(
+        new Blockly.FieldDropdown([['整数', 'int'], ['小数', 'double'], ['字符', 'char']]), 'TO');
       this.setInputsInline(true);
       this.setOutput(true, 'Value');
-      this.setTooltip('显式类型转换 (int)x / (double)x / (char)x。7 / 2 得 3，(double)7 / 2 得 3.5。');
+      this.setTooltip('值类型转换：显式转换 (int)x / (double)x / (char)x。7 / 2 得 3，(double)7 / 2 得 3.5。');
     },
   };
 
@@ -863,9 +866,9 @@
       this.appendDummyInput()
         .appendField('函数')
         .appendField(nameField('sum'), 'NAME')
-        .appendField('返回')
+        .appendField('→')
         .appendField(new Blockly.FieldDropdown([
-          ['无返回值 void', 'void'], ['整数 int', 'int'], ['小数 double', 'double'], ['字符 char', 'char'],
+          ['无 void', 'void'], ['整数 int', 'int'], ['小数 double', 'double'], ['字符 char', 'char'],
           ['文本 string', 'string'],
         ]), 'RET')
         .appendField('参数')
@@ -873,7 +876,7 @@
           [['无', '0'], ['1 个', '1'], ['2 个', '2'], ['3 个', '3']],
           function (v) { const b = this.getSourceBlock(); if (b.updateParams_) b.updateParams_(v); return v; }
         ), 'NP');
-      this.appendStatementInput('BODY').setCheck(STMT).appendField('执行');
+      this.appendStatementInput('BODY').setCheck(STMT);
       this.updateParams_ = function (count) {
         const n = parseInt(count, 10) || 0;
         for (let i = 0; i < 3; i++) if (this.getInput('P' + i)) this.removeInput('P' + i);
@@ -907,7 +910,7 @@
         const inp = block.getInput('ARG' + i);
         const want = i < n;
         if (!!inp !== want) { same = false; break; }
-        if (inp && d && String((inp.fieldRow[0] || {}).getValue && inp.fieldRow[0].getValue()) !== ('   ' + d.params[i].name + ' ＝')) { same = false; break; }
+        if (inp && d && String((inp.fieldRow[0] || {}).getValue && inp.fieldRow[0].getValue()) !== ('   ' + d.params[i].name + ' =')) { same = false; break; }
       }
     }
     if (same) return;
@@ -915,7 +918,7 @@
     for (let i = 0; i < 8; i++) if (block.getInput('ARG' + i)) block.removeInput('ARG' + i);
     for (let i = 0; i < n; i++) {
       const inp = block.appendValueInput('ARG' + i).setCheck('Value');
-      inp.appendField('   ' + d.params[i].name + ' ＝');
+      inp.appendField('   ' + d.params[i].name + ' =');
     }
     block.setInputsInline(false);
   }
@@ -938,7 +941,7 @@
       this.cKind = 'call';
       this.setColour(COL.func);
       this.appendDummyInput()
-        .appendField('执行函数')
+        .appendField('调用')
         .appendField(dynField(fnList('void'), { kind: 'funcVoid' }, function (v) {
           callArgs_(this.getSourceBlock(), v);
           return v;
@@ -947,7 +950,7 @@
       this.setNextStatement(true, STMT);
       this.saveExtraState = function () { return { fn: this.getFieldValue('NAME') || '' }; };
       this.loadExtraState = function (s) { if (s && s.fn) callArgs_(this, s.fn); };
-      this.setTooltip('调用「无返回值 void」的函数，作为一条语句执行：f(表达式);');
+      this.setTooltip('调用函数（语句块）：调「无返回值 void」的函数，作为一条语句执行：f(表达式);');
     },
   };
 
@@ -956,16 +959,15 @@
       this.cKind = 'call';
       this.setColour(COL.func);
       this.appendDummyInput()
-        .appendField('函数')
+        .appendField('调用')
         .appendField(dynField(fnList('value'), { kind: 'funcVal' }, function (v) {
           callArgs_(this.getSourceBlock(), v);
           return v;
-        }), 'NAME')
-        .appendField('的返回值');
+        }), 'NAME');
       this.setOutput(true, 'Value');
       this.saveExtraState = function () { return { fn: this.getFieldValue('NAME') || '' }; };
       this.loadExtraState = function (s) { if (s && s.fn) callArgs_(this, s.fn); };
-      this.setTooltip('调用有返回值的函数，返回值可以塞进任何数值槽：f(表达式)。');
+      this.setTooltip('调用函数（值块）：调有返回值的函数，返回值可以塞进任何数值槽：f(表达式)。');
     },
   };
 
