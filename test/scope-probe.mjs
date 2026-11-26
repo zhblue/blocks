@@ -213,7 +213,7 @@ function addField(b, name, kind, cands) {
 
 /** 带变量下拉的「变量」值块 */
 function vgetF(cands) { const b = blk('var_get', { VAR: '__none__' }, true); addField(b, 'VAR', 'var', cands); return b; }
-/** 带变量下拉的「读入到变量」语句块 */
+/** 带变量下拉的「读入」语句块 */
 function readF(cands) { const b = blk('read', { VAR: '__none__' }); addField(b, 'VAR', 'var', cands); return b; }
 /** 带数组下拉的「数组第 i 项」值块 */
 function arrGetF(cands) { const b = blk('arr_get', { ARR: '__none__' }, true); addField(b, 'ARR', 'array', cands); return b; }

@@ -276,7 +276,7 @@ cases[3].expectDiag = [
   '在这里不可见',
   '有中文',
   '只能放在循环积木里面',
-  '只吃「变量」或「数组的第 i 项」',
+  '只吃「变量」或「a[i]」',
   '读小数必须写 %lf',
 ];
 
@@ -527,7 +527,7 @@ console.log('\n══════ 文本变量 ══════');
       const g = CGen.generate(w, { annotate: false, lang: 'cpp' });
       return g.code.includes('printf("%s\\n", (a + b).c_str());') && !g.hasError;
     })());
-  check('scanf 的 %s 配 std::string 报错并指向「读入到变量」',
+  check('scanf 的 %s 配 std::string 报错并指向「读入」',
     r.diagnostics.some((d) => d.sev === 'error' && /%s 不能往文本变量「s」里写/.test(d.msg) && /std::cin >> s/.test(d.msg)));
   check('C++ 模式不带 <string.h> 也不出 strcpy', !r.code.includes('#include <string.h>') && !r.code.includes('strcpy'));
   check('cin >> 文本会提示「只读到一个词」', r.diagnostics.some((d) => d.sev === 'info' && /遇到空格、Tab 或换行就停/.test(d.msg)));
@@ -661,7 +661,7 @@ console.log('\n══════ 文本变量 ══════');
    「循环外」「函数体里」「循环结束之后」照旧报错：修的是漏计数，不是把守卫拆掉。 */
 console.log('\n══════ break / continue 与四种循环 ══════');
 {
-  const CN = { for: '计数循环', repeat: '重复 N 次', while: '当…就重复', until: '重复直到' };
+  const CN = { for: '计数循环', repeat: '重复 N 次', while: '当…重复', until: '重复…直到' };
   const loopOf = (kind, body) => {
     if (kind === 'for') return blk('for', { NAME: 'i' }, { FROM: num(1), TO: num(10), STEP: num(1), DO: body });
     if (kind === 'repeat') return blk('repeat', {}, { TIMES: num(10), DO: body });
@@ -735,6 +735,48 @@ console.log('\n══════ break / continue 与四种循环 ════�
   const shape2 = run([blk('main', {}, { BODY: [loopOf('repeat', [blk('continue', {}, {})])] })], 'c');
   check('重复 N 次 + continue 生成 for (int c_i1 = 0; c_i1 < 10; c_i1 += 1) { … continue; … }',
     shape2.code.includes('for (int c_i1 = 0; c_i1 < 10; c_i1 += 1) {') && /\{\s*continue;\s*\}/.test(shape2.code));
+}
+
+/* ---------------- 积木脸：只留动作词和 C 符号 ---------------- */
+/* 这个阶段的孩子只认图不认字，所以脸上不许再出现「重复执行 / 就执行 / 为止 /
+   初始值（可留空）/ 的第…项 / 读入到变量 / 执行函数 / 的返回值 / 转成…的值」这类
+   填充词。这一节直接扫 c-blocks.js 里 appendField 的字面量，把约定钉住：谁往脸上
+   加回长中文，这里就红。解释一律留在 setTooltip 里，不受这条约束。 */
+console.log('\n══════ 积木脸文字 ══════');
+{
+  const src = fs.readFileSync(path.join(root, 'js/c-blocks.js'), 'utf8');
+  const faces = [];
+  const re = /appendField\(\s*(['"])((?:\\.|(?!\1)[^\\])*)\1/g;
+  let m;
+  while ((m = re.exec(src))) faces.push(m[2]);
+  const BANNED = ['重复执行', '就执行', '为止', '每次加', '跳出循环', '跳过本轮', '初始值',
+    '读入到', '的第', '项设为', '执行函数', '的返回值', '转成', '的值', '声明', '变量', '数组', '长度', '令'];
+  const hits = [];
+  for (const f of faces) for (const w of BANNED) if (f.includes(w)) hits.push('「' + f + '」含 ' + w);
+  check('脸上没有填充词（扫了 ' + faces.length + ' 处 appendField 字面量）', hits.length === 0);
+  if (hits.length) console.log('  ' + hits.join('\n  '));
+
+  const NEED = ['主程序', '如果', '否则', '重复', '次', '当', '直到', '从', '到', '步长',
+    '跳出', '跳过', '=', '[', ']', '输出', '换行', '读入', '调用', '返回', '函数', '参数', '→'];
+  const missing = NEED.filter((w) => !faces.includes(w));
+  check('该上脸的动作词和 C 符号一个不少（缺 ' + missing.length + ' 个）', missing.length === 0);
+  if (missing.length) console.log('  缺：' + missing.join(' '));
+
+  const cjk = (s) => (s.match(/[\u4e00-\u9fff]/g) || []).length;
+  const longest = faces.reduce((a, b) => (cjk(b) > cjk(a) ? b : a), '');
+  check('脸上最长的一串中文 ≤3 个字（现在是「' + longest + '」' + cjk(longest) + ' 字）', cjk(longest) <= 3);
+
+  /* 精简的是脸，不是信息量：解释必须还在悬停提示里，且开头给一个口语名，
+     生成器的诊断用同一套名字指路，孩子悬停就能对上号。 */
+  const tips = (src.match(/setTooltip\(/g) || []).length;
+  check('每块积木都还留着悬停提示（' + tips + ' 处 setTooltip）', tips >= 31);
+  for (const nm of ['声明变量', '声明数组', '变量赋值', '值类型转换', '调用函数']) {
+    check('tooltip 里有口语名「' + nm + '」，诊断指路能对上面孔', src.includes(nm));
+  }
+  /* 下拉「没得选」时脸上那句话也要短，但仍要说清是哪一种没有 */
+  for (const [k, v] of Object.entries({ EMPTY_FLOATING: '还没接进程序体', EMPTY_NOT_IN_PROGRAM: '放在这块之前', EMPTY_SCOPE: '没有可见的声明' })) {
+    check('占位提示 ' + k + ' 压短了且仍说明原因', src.includes(k) && src.includes(v));
+  }
 }
 
 console.log('\n' + (fails ? '✗ ' + fails + ' 项不通过' : '✓ 全部断言通过'));
